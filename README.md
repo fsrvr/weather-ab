@@ -33,3 +33,6 @@ Other systems: `pip install -r requirements.txt` (needs Tk).
 ## Notes
 
 Track lines on historic storms are approximate. Not for safety decisions; use official warnings.
+
+![Preview 1](preview.png)
+![Preview 2](preview2.png)
