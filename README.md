@@ -6,7 +6,7 @@ satellite map, plus an archive of the most extreme weather events ever recorded.
 ## Install (Arch Linux)
 
     sudo pacman -S --needed python tk python-requests python-pillow
-    git clone <your-repo-url> && cd weather-ab
+    git clone https://github.com/fsrvr/weather-ab && cd weather-ab
     python main.py
 
 Other systems: `pip install -r requirements.txt` (needs Tk).
@@ -22,7 +22,7 @@ Other systems: `pip install -r requirements.txt` (needs Tk).
 - **Menu bar**: Export events as JSON, Surprise me, previous/next month, fullscreen, usage.
 - **Shortcuts**: Ctrl+F search a city, Ctrl+Q quit, Esc deselect.
 
-## Data sources (no API keys)
+## Data sources
 
 - NASA EONET: storms and floods
 - US National Weather Service: tornado and extreme wind alerts (live)
