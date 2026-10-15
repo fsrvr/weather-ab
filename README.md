@@ -9,7 +9,8 @@ satellite map, plus an archive of the most extreme weather events ever recorded.
     git clone https://github.com/fsrvr/weather-ab && cd weather-ab
     python main.py
 
-Other systems: `pip install -r requirements.txt` (needs Tk).
+## Other systems (Debian, Macos): 
+`pip install -r requirements.txt` (needs Tk).
 
 ## Usage
 
