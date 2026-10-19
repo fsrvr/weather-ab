@@ -65,6 +65,8 @@ On Linux/macOS you can also run `./run.sh` (after `chmod +x run.sh`).
 - **Continent**: limit results to one continent and fly there (both tabs, also under View).
 - **Map**: drag to pan, scroll to zoom at the mouse, click an event for its size, track and facts.
 - **Menu bar**: Export events as JSON, Surprise me, previous/next month, fullscreen, usage.
+- **Tutorial**: shown on first launch, reopen from Help > Tutorial.
+- **Tutorial**: shown on first launch, reopen from Help > Tutorial.
 - **Shortcuts**: Ctrl+F search a city, Ctrl+Q quit, Esc deselect.
 
 ## Data sources
