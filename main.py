@@ -439,6 +439,21 @@ def in_cont(ev, name):
     return s_ <= ev["lat"] <= n_ and w_ <= ev["lon"] <= e_
 
 
+TUTORIAL = [
+    ("Welcome", "This app maps extreme weather on a satellite map. Quick 30 second tour."),
+    ("Live tab", "Spin the month and year wheel. The current month shows live storms, floods, "
+                 "US tornado warnings and 100+ km/h winds."),
+    ("Archive tab", "About 30 of the most extreme events ever recorded. Filter by type, "
+                    "or press Surprise me."),
+    ("Continent", "Pick a continent to fly there and only show events inside it."),
+    ("The map", "Drag to pan, scroll to zoom at the cursor. Click a circle to see its size, "
+                "track and facts."),
+    ("Event cards", "Click a card on the left to fly to that event. Esc deselects."),
+    ("Shortcuts", "Ctrl+F searches a city, Ctrl+Q quits, F1 opens usage. Reopen this tour "
+                  "anytime from Help > Tutorial."),
+]
+
+
 USAGE = """EXTREME WEATHER TRACKER
 
 LIVE TAB
@@ -1263,6 +1278,7 @@ class App(tk.Tk):
         self.bind("<Escape>", lambda e: (self.map.select(None), self.pick_card(None)))
         self.after(40, self.poll)
         self.after(900, lambda: self.schedule(0))
+        self.after(1500, self.first_run)
 
     @property
     def hr(self):
@@ -1327,6 +1343,60 @@ class App(tk.Tk):
         if f:
             with open(f, "w") as fh:
                 json.dump(self.items, fh, indent=2, default=str)
+
+    def first_run(self):
+        flag = os.path.expanduser("~/.config/weather-ab-seen")
+        if os.path.exists(flag):
+            return
+        try:
+            os.makedirs(os.path.dirname(flag), exist_ok=True)
+            open(flag, "w").write("1")
+        except OSError:
+            pass
+        self.show_tutorial()
+
+    def show_tutorial(self):
+        if getattr(self, "_tut", None) and self._tut.winfo_exists():
+            return self._tut.lift()
+        w = self._tut = tk.Frame(self, bg=BG, width=480, height=280,
+                                 highlightthickness=2, highlightbackground=ACCENT)
+        w.pack_propagate(False)
+        w.place(relx=0.5, rely=0.5, anchor="center")
+        w.lift()
+        st = {"i": 0}
+        n = len(TUTORIAL)
+        dots = tk.Label(w, bg=BG, fg=ACCENT, anchor="w", font=(SANS, 10))
+        dots.pack(fill="x", padx=28, pady=(24, 0))
+        title = tk.Label(w, bg=BG, fg=TEXT, anchor="w", font=(SANS, 20, "bold"))
+        title.pack(fill="x", padx=28, pady=(6, 0))
+        body = tk.Label(w, bg=BG, fg=MUTED, anchor="nw", justify="left", wraplength=420,
+                        font=(SERIF, 13))
+        body.pack(fill="both", expand=True, padx=28, pady=(8, 0))
+        bar = tk.Frame(w, bg=BG)
+        bar.pack(fill="x", padx=28, pady=(0, 22))
+        skip = button(bar, "Skip", w.destroy, bg=BG, fg=MUTED)
+        skip.pack(side="left")
+        nxt = button(bar, "Next", lambda: go(1), bg=ACCENT, fg=BG, bold=True)
+        nxt.pack(side="right")
+        back = button(bar, "Back", lambda: go(-1))
+        back.pack(side="right", padx=(0, 8))
+
+        def go(d):
+            if st["i"] + d >= n:
+                return w.destroy()
+            st["i"] = max(0, st["i"] + d)
+            i = st["i"]
+            dots.configure(text=" ".join("●" if k == i else "○" for k in range(n)))
+            title.configure(text=TUTORIAL[i][0])
+            body.configure(text=TUTORIAL[i][1])
+            nxt.configure(text="Done" if i == n - 1 else "Next")
+            back.configure(state="normal" if i else "disabled")
+
+        go(0)
+        w.bind("<Escape>", lambda e: w.destroy())
+        w.bind("<Right>", lambda e: go(1))
+        w.bind("<Left>", lambda e: go(-1))
+        w.focus_set()
 
     def show_usage(self):
         w = tk.Toplevel(self)
@@ -1449,6 +1519,7 @@ class App(tk.Tk):
         add(m, "Current month", self.this_month, "Alt+Home", "<Alt-Home>")
 
         m = mk("Help")
+        m.add_command(label="Tutorial", command=self.show_tutorial)
         add(m, "Usage", self.show_usage, "F1", "<F1>")
         add(m, "Report an issue", lambda: webbrowser.open("https://github.com/fsrvr/weather-ab/issues"))
 
