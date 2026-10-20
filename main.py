@@ -1,6 +1,8 @@
 import os, io, json, math, time, random, webbrowser, queue, threading, datetime as dt
 import tkinter as tk
-import requests
+import requests, socket
+import urllib3.util.connection as _uc
+_uc.allowed_gai_family = lambda: socket.AF_INET
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageTk, ImageDraw
 
@@ -90,8 +92,14 @@ def get_eonet(y, m, live, whole=False):
         last = calendar.monthrange(y, m)[1]
         p = {"status": "all", "start": f"{y}-{m:02d}-01", "end": f"{y}-{m:02d}-{last}",
              "category": "severeStorms,floods"}
-    r = SES.get(EONET, params=p, headers=HDR, timeout=25)
-    r.raise_for_status()
+    for i in range(3):
+        try:
+            r = (SES if i == 0 else requests).get(EONET, params=p, headers=HDR, timeout=25)
+            r.raise_for_status()
+            break
+        except requests.RequestException:
+            if i == 2: raise
+            time.sleep(1.5)
     out = []
     for ev in r.json().get("events", []):
         pts = [g for g in ev.get("geometry", []) if g.get("type") == "Point"]
@@ -1737,6 +1745,7 @@ class App(tk.Tk):
         else:
             self.scan_id += 1
             self.status.configure(text="Looking for extreme events...", fg=ACCENT)
+            self.start_eta(self.scan_id, "live" if live else "past")
             self.map.hold = True
             self.after(12000, lambda: setattr(self.map, "hold", False))
         sid = self.scan_id
@@ -1793,7 +1802,29 @@ class App(tk.Tk):
             if not acc:
                 push([], True)
             self.map.hold = False
+            ui(lambda: self.eta_done(sid))
         threading.Thread(target=work, daemon=True).start()
+
+    def start_eta(self, sid, kind):
+        if not hasattr(self, "_durs"):
+            self._durs = {}
+        d = self._durs.get(kind, [])[-3:]
+        est = sum(d) / len(d) if d else (8 if kind == "live" else 3)
+        self._eta = (sid, time.time(), kind)
+        def tick():
+            if not self._eta or self._eta[0] != sid or self._fsid == sid:
+                return
+            el = time.time() - self._eta[1]
+            t = f" {round(el)}s" if el >= 3 else ""
+            self.status.configure(text=f"Looking for extreme events...{t}", fg=ACCENT)
+            self.after(500, tick)
+        tick()
+
+    def eta_done(self, sid):
+        e = getattr(self, "_eta", None)
+        if e and e[0] == sid:
+            self._durs.setdefault(e[2], []).append(time.time() - e[1])
+            self._eta = None
 
     def begin(self):
         for w in self.inner.winfo_children():
