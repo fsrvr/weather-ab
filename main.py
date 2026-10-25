@@ -183,9 +183,46 @@ def get_winds(points, date, hour):
     return []
 
 
-KINDS = ["All", "Tornado", "Hurricane", "Blizzard", "Flood", "Heat", "Cold", "Wind"]
+USGS = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_week.geojson"
+
+def get_quakes():
+    r = requests.get(USGS, headers=HDR, timeout=20)
+    r.raise_for_status()
+    out = []
+    for f in r.json().get("features", []):
+        p = f["properties"]
+        mag = p.get("mag") or 0
+        if mag < 5.5:
+            continue
+        lon, lat = f["geometry"]["coordinates"][:2]
+        out.append({"lat": lat, "lon": lon,
+                    "sev": 3 if mag >= 6.5 else 2,
+                    "title": p.get("place", "Earthquake"),
+                    "kind": "Quake",
+                    "desc": f"M{mag:.1f} earthquake.",
+                    "radius": int(20 + mag * 15),
+                    "track": [], "fc": []})
+    return out
+
+
+def get_fires():
+    r = requests.get(EONET, params={"status": "open", "category": "wildfires", "limit": 40},
+                     headers=HDR, timeout=25)
+    r.raise_for_status()
+    out = []
+    for ev in r.json().get("events", []):
+        pts = [g for g in ev.get("geometry", []) if g.get("type") == "Point"]
+        if not pts:
+            continue
+        lon, lat = pts[-1]["coordinates"][:2]
+        out.append({"lat": lat, "lon": lon, "sev": 2, "title": ev["title"], "kind": "Fire",
+                    "desc": "Active wildfire.", "radius": 40, "track": [], "fc": []})
+    return out
+
+
+KINDS = ["All", "Tornado", "Hurricane", "Blizzard", "Flood", "Heat", "Cold", "Wind", "Quake", "Fire"]
 KIND_COL = {"Tornado": "#e5534b", "Hurricane": "#4fa8e8", "Blizzard": "#a5d8ff",
-            "Flood": "#6f86f5", "Heat": "#f0a030", "Cold": "#6fd3d9", "Wind": "#c58af0"}
+            "Flood": "#6f86f5", "Heat": "#f0a030", "Cold": "#6fd3d9", "Wind": "#c58af0", "Quake": "#f5c842", "Fire": "#ff6b2b"}
 
 
 def E(name, kind, ym, disp, lat, lon, radius, tag, desc, facts, track=None):
@@ -1022,6 +1059,15 @@ class TileMap(tk.Canvas):
                 rc = self.create_rectangle(bb[0] - 9, bb[1] - 4, bb[2] + 9, bb[3] + 4,
                                            fill=BG, outline=c, width=2 if on else 1)
                 self.tag_lower(rc, t)
+        mpp = 156543.03 * max(0.05, math.cos(math.radians(self.lat))) / 2 ** fz
+        for target_km in (1000, 500, 200, 100, 50, 20, 10, 5, 1):
+            bar_px = target_km * 1000 / mpp
+            if 60 <= bar_px <= 200:
+                bx, by = 16, h - 32
+                self.create_rectangle(bx, by, bx + bar_px, by + 4, fill=TEXT, outline="")
+                self.create_text(bx + bar_px / 2, by - 7, text=f"{target_km} km",
+                                 fill=TEXT, font=(SANS, 8), anchor="center")
+                break
         self.create_text(w - 8, h - 8, anchor="se", fill="#ddd", font=(SANS, 8),
                          text="Imagery © Esri, Maxar, Earthstar Geographics")
 
@@ -1131,6 +1177,25 @@ class DatePicker(tk.Canvas):
         self.create_rectangle(0, 0, W, 36, fill=SURF, outline="", stipple="gray50")
         self.create_rectangle(0, H - 36, W, H, fill=SURF, outline="", stipple="gray50")
 
+KIND_COL.setdefault("Storm", "#4fa8e8")
+KIND_COL.setdefault("Alert", "#e5534b")
+
+
+def stats_bar(fr, items, on_click):
+    for w in fr.winfo_children():
+        w.destroy()
+    c = {}
+    for it in items:
+        c[it["kind"]] = c.get(it["kind"], 0) + 1
+    for i, (k, n) in enumerate(sorted(c.items(), key=lambda x: -x[1])):
+        col = KIND_COL.get(k, ACCENT)
+        tk.Button(fr, text=f"{k}  {n}", command=lambda k=k: on_click(k), bg=SURF2, fg=col,
+                  activebackground=BORDER, activeforeground=col, relief="flat", bd=0, padx=10,
+                  pady=4, cursor="hand2", font=(SANS, 9, "bold")
+                  ).grid(row=i // 3, column=i % 3, padx=(0, 6), pady=(0, 6), sticky="ew")
+        fr.columnconfigure(i % 3, weight=1)
+
+
 # ---------------- app ----------------
 def button(parent, text, cmd, bg=SURF2, fg=TEXT, bold=False, **kw):
     return tk.Button(parent, text=text, command=cmd, bg=bg, fg=fg, activebackground=BORDER,
@@ -1168,7 +1233,6 @@ class App(tk.Tk):
         self.lcv = tk.Canvas(shell, bg=BG, highlightthickness=0, yscrollincrement=20,
                              yscrollcommand=self.lsb.set)
         self.lsb.configure(command=self.lcv.yview)
-        self.lsb.pack(side="right", fill="y")
         self.lcv.pack(side="left", fill="both", expand=True)
         left = tk.Frame(self.lcv, bg=BG)
         left.pack_propagate(False)
@@ -1205,6 +1269,15 @@ class App(tk.Tk):
                   activebackground=BORDER, activeforeground=TEXT).pack(side="right")
         self.ctrl = tk.Frame(left, bg=BG)
         self.ctrl.pack(fill="x", padx=28, pady=(12, 0))
+        srow = tk.Frame(left, bg=BG)
+        srow.pack(fill="x", padx=28, pady=(10, 0), before=self.ctrl)
+        self.stab = {}
+        for key, label in (("filters", "Filters"), ("events", "Events")):
+            b = tk.Button(srow, text=label, command=lambda k=key: self.sub(k), relief="flat", bd=0,
+                          padx=14, pady=4, cursor="hand2", font=(SANS, 10, "bold"),
+                          activebackground=BORDER, activeforeground=TEXT)
+            b.pack(side="left", padx=(0, 6))
+            self.stab[key] = b
         self.pk = tk.Frame(self.ctrl, bg=BG)
         self.pk.pack()
         self.picker = DatePicker(self.pk, lambda: self.schedule(500))
@@ -1225,15 +1298,18 @@ class App(tk.Tk):
             b.grid(row=i // 4, column=i % 4, padx=(0, 6), pady=(0, 6), sticky="ew")
             self.chips.columnconfigure(i % 4, weight=1)
             self.chip[k] = b
-        self.cont_menu(self.chips).grid(row=2, column=0, columnspan=4, sticky='ew', pady=(6, 0))
+        self.cont_menu(self.chips).grid(row=3, column=0, columnspan=4, sticky='ew', pady=(6, 0))
         self.paint_tabs()
 
-        tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=28, pady=(18, 0))
+        self.sep = tk.Frame(left, bg=BORDER, height=1)
+        self.sep.pack(fill="x", padx=28, pady=(14, 0))
         self.status = tk.Label(left, text="Starting...", bg=BG, fg=ACCENT, anchor="w",
                                justify="left", wraplength=360, font=(SANS, 10, "bold"))
         self.status.pack(fill="x", padx=28, pady=(12, 6))
+        self.statsbar = tk.Frame(left, bg=BG)
+        self.statsbar.pack(fill="x", padx=28, pady=(0, 4))
 
-        wrap = tk.Frame(left, bg=BG)
+        self.wrap = wrap = tk.Frame(left, bg=BG)
         wrap.pack(fill="both", expand=True, padx=(22, 10), pady=(0, 14))
         self.cv = tk.Canvas(wrap, bg=BG, highlightthickness=0)
         self.cv.pack(fill="both", expand=True)
@@ -1283,6 +1359,7 @@ class App(tk.Tk):
         self.b_copy.pack(side="left", padx=(6, 0))
 
         self.build_menubar()
+        self.sub("filters")
         self.bind("<Escape>", lambda e: (self.map.select(None), self.pick_card(None)))
         self.after(40, self.poll)
         self.after(900, lambda: self.schedule(0))
@@ -1307,6 +1384,7 @@ class App(tk.Tk):
         return c[0] if c else None
 
     def set_cont(self, v=None):
+        self.sub("filters")
         c = CONT.get(self.cont.get())
         if c:
             self.map.fly_to(c[1][0], c[1][1], c[2], 1100)
@@ -1540,7 +1618,7 @@ class App(tk.Tk):
 
     def fit_left(self):
         w, h = self.lcv.winfo_width(), self.lcv.winfo_height()
-        H = max(h, int(1100 * self.f))
+        H = max(h, 1)
         self.lcv.itemconfig(self.lwin, width=max(1, w), height=H)
         self.lcv.configure(scrollregion=(0, 0, w, H))
 
@@ -1599,6 +1677,28 @@ class App(tk.Tk):
         self.map.scaled.clear()
         self.map.redraw()
 
+    def sub(self, which):
+        self.subtab = which
+        hdr = [w for w in self.left.winfo_children() if isinstance(w, tk.Label)
+               and str(w.cget("text")).startswith(("Extreme weather", "Hurricanes, floods"))]
+        for w in hdr:
+            w.pack_forget()
+        if which == "filters":
+            for w in (self.sep, self.status, self.statsbar, self.wrap):
+                w.pack_forget()
+            for k, w in enumerate(hdr):
+                w.pack(fill="x", padx=28, pady=(8, 4) if k == 0 else 0, before=self.loc)
+            self.ctrl.pack(fill="x", padx=28, pady=(12, 0))
+        else:
+            self.ctrl.pack_forget()
+            self.sep.pack(fill="x", padx=28, pady=(14, 0))
+            self.status.pack(fill="x", padx=28, pady=(10, 4))
+            self.statsbar.pack(fill="x", padx=28, pady=(0, 4))
+            self.wrap.pack(fill="both", expand=True, padx=(22, 10), pady=(0, 14))
+        for k, b in self.stab.items():
+            on = k == which
+            b.configure(bg=SURF2 if on else BG, fg=ACCENT if on else MUTED)
+
     def paint_tabs(self):
         for k, b in self.tab.items():
             on = k == self.mode
@@ -1624,6 +1724,7 @@ class App(tk.Tk):
             self.show_archive()
 
     def set_filter(self, k):
+        self.sub("filters")
         self.flt = k
         self.paint_tabs()
         if self.mode == "archive":
@@ -1635,6 +1736,7 @@ class App(tk.Tk):
         self.show(items, "ALL-TIME RECORDS", None)
 
     def surprise(self):
+        self.sub("filters")
         self.flt = "All"
         if self.mode != "archive":
             self.set_mode("archive")
@@ -1781,6 +1883,8 @@ class App(tk.Tk):
                 jobs.append(("eonet", lambda: get_eonet(y, m, live, whole)))
             if live and not vo:
                 jobs.append(("nws", get_nws))
+                jobs.append(("quakes", get_quakes))
+                jobs.append(("fires", get_fires))
             if live:
                 jobs.append(("wind", lambda: get_winds(pts, now.date(), now.hour)))
 
@@ -1832,10 +1936,17 @@ class App(tk.Tk):
         self.cards, self.items, self.cur = [], [], None
         self.detail.place_forget()
         self.map.set_marks([])
+        stats_bar(self.statsbar, [], None)
+        self.stab["events"].configure(text="Events")
+        self.groups, self._anim_n = {}, 0
 
     def count_status(self, label):
         n = len(self.items)
         self.status.configure(text=f"{n} EXTREME EVENT{'S' if n != 1 else ''} · {label}", fg=TEXT)
+        self.stab["events"].configure(text=f"Events  {n}")
+        stats_bar(self.statsbar, self.items, self.jump_group)
+        if self.f != 1.0:
+            self.scale_fonts(self.statsbar)
 
     def show(self, items, date, hour):
         self.begin()
@@ -1880,14 +1991,83 @@ class App(tk.Tk):
         else:
             self._draining = False
 
+    def group(self, kind, color):
+        g = self.groups.get(kind)
+        if g:
+            return g
+        fr = tk.Frame(self.inner, bg=BG)
+        fr.pack(fill="x", pady=(8, 0))
+        hd = tk.Label(fr, bg=SURF2, fg=color, anchor="w", cursor="hand2", padx=12, pady=7,
+                      font=(SANS, 10, "bold"))
+        hd.pack(fill="x", padx=(0, 6))
+        box = tk.Frame(fr, bg=BG)
+        box.pack(fill="x")
+        g = {"fr": fr, "hd": hd, "box": box, "n": 0, "open": True, "kind": kind,
+             "touched": False, "auto": False}
+        hd.bind("<Button-1>", lambda e, g=g: self.toggle_group(g, True))
+        self.groups[kind] = g
+        if self.f != 1.0:
+            self.scale_fonts(hd)
+        return g
+
+    def group_head(self, g):
+        if g["n"] > 5 and g["open"] and not g["touched"] and not g["auto"]:
+            g["auto"], g["open"] = True, False
+            g["box"].pack_forget()
+        ar = "▾" if g["open"] else "▸"
+        g["hd"].configure(text=f"{ar}  {g['kind'].upper()}   {g['n']}")
+
+    def toggle_group(self, g, user=False):
+        g["open"] = not g["open"]
+        if user:
+            g["touched"] = True
+        if g["open"]:
+            g["box"].pack(fill="x")
+        else:
+            g["box"].pack_forget()
+        self.group_head(g)
+
+    def jump_group(self, kind):
+        g = self.groups.get(kind)
+        if not g:
+            return
+        if not g["open"]:
+            self.toggle_group(g, True)
+        self.update_idletasks()
+        y = g["fr"].winfo_rooty() - self.inner.winfo_rooty()
+        self.cv.yview_moveto(max(0, y - 10) / max(1, self.inner.winfo_height()))
+
+    def animate_in(self, i, card, g):
+        if not g["open"] or self._anim_n >= 14:
+            return
+        self._anim_n += 1
+        n, sid, steps = self._anim_n, self._fsid, 10
+
+        def step(k):
+            if sid != self._fsid or i >= len(self.cards) or self.cards[i][0] is not card:
+                return
+            try:
+                e = 1 - (1 - k / steps) ** 3
+                card.pack_configure(padx=(int(40 * (1 - e)), 6))
+                if i != self.cur:
+                    self.paint(i, blend("#4a3326", SURF, e))
+                if k < steps:
+                    self.after(22, lambda: step(k + 1))
+            except tk.TclError:
+                pass
+        self.after((n - 1) * 45, lambda: step(0))
+
     def add_card(self, it):
         i = len(self.items)
         self.items.append(it)
         color, tag = style(it)
         self.map.add_mark({"lat": it["lat"], "lon": it["lon"], "color": color, "label": it["title"],
                            "radius": it["radius"], "track": it["track"], "fc": it["fc"]})
-        card = tk.Frame(self.inner, bg=SURF, cursor="hand2")
+        g = self.group(it["kind"], color)
+        card = tk.Frame(g["box"], bg=SURF, cursor="hand2")
         card.pack(fill="x", pady=5, padx=(0, 6))
+        g["n"] += 1
+        self.group_head(g)
         bar = tk.Frame(card, bg=color, width=4)
         bar.pack(side="left", fill="y")
         body = tk.Frame(card, bg=SURF)
@@ -1908,6 +2088,7 @@ class App(tk.Tk):
         self.cards.append((card, body, parts))
         if self.f != 1.0:
             self.scale_fonts(card)
+        self.animate_in(i, card, g)
 
     def paint(self, i, bg):
         if i >= len(self.cards): return
@@ -1942,9 +2123,14 @@ class App(tk.Tk):
             meta += "\n" + it["facts"]
         self.d_meta.configure(text=meta)
         self.detail.place(relx=0, rely=1, x=16, y=-34, anchor="sw")
+        if getattr(self, "subtab", "events") != "events":
+            self.sub("events")
+        g = self.groups.get(it["kind"])
+        if g and not g["open"]:
+            self.toggle_group(g)
         if scroll:
             self.update_idletasks()
-            y = self.cards[i][0].winfo_y()
+            y = self.cards[i][0].winfo_rooty() - self.inner.winfo_rooty()
             self.cv.yview_moveto(max(0, y - 20) / max(1, self.inner.winfo_height()))
 
 
