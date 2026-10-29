@@ -1,4 +1,5 @@
 # Extreme Weather Tracker
+(STILL IN ALPHA)
 
 A dark desktop app that maps hurricanes, floods, tornado warnings and 100+ km/h winds on a
 satellite map, plus an archive of the most extreme weather events ever recorded.
