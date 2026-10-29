@@ -11,7 +11,7 @@ FORECAST = "https://api.open-meteo.com/v1/forecast"
 ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 EONET = "https://eonet.gsfc.nasa.gov/api/v3/events"
 NWS = "https://api.weather.gov/alerts/active"
-NWS_EVENTS = "Tornado Warning,Extreme Wind Warning,Flash Flood Emergency,Hurricane Warning,Storm Surge Warning,Blizzard Warning"
+NWS_EVENTS = "Tornado Warning,Extreme Wind Warning,Flash Flood Emergency,Hurricane Warning,Storm Surge Warning,Blizzard Warning,Tornado Watch,High Wind Warning,Ice Storm Warning,Extreme Cold Warning,Extreme Heat Warning,Excessive Heat Warning"
 HDR = {"User-Agent": "WeatherAbnormalityTracker/4.0 (github project)"}
 RESAMPLE = Image.Resampling.BILINEAR
 SES = requests.Session()
@@ -57,7 +57,14 @@ NWS_INFO = {
     "Hurricane Warning": "Hurricane conditions expected within 36 hours. Finish preparations and follow evacuation orders.",
     "Storm Surge Warning": "Life-threatening flooding from rising seawater expected near the coast.",
     "Blizzard Warning": "Heavy snow and strong wind cause whiteout conditions. Avoid all travel.",
+    "Tornado Watch": "Conditions favor tornadoes in this area. Stay alert and know where to shelter.",
+    "High Wind Warning": "Damaging winds expected. Secure loose objects and avoid driving high-profile vehicles.",
+    "Ice Storm Warning": "Heavy ice buildup will bring down trees and power lines. Avoid travel.",
+    "Extreme Cold Warning": "Dangerously cold air. Frostbite can set in within minutes.",
+    "Extreme Heat Warning": "Dangerous heat. Limit time outdoors and stay hydrated.",
+    "Excessive Heat Warning": "Dangerous heat. Limit time outdoors and stay hydrated.",
 }
+NWS_HI = {"Tornado Warning", "Extreme Wind Warning", "Hurricane Warning", "Storm Surge Warning", "Blizzard Warning"}
 def cat(k):
     for lim, n in ((252, "Category 5 hurricane"), (209, "Category 4 hurricane"), (178, "Category 3 hurricane"),
                    (154, "Category 2 hurricane"), (119, "Category 1 hurricane"), (63, "Tropical storm")):
@@ -95,75 +102,133 @@ def storm_kind(title):
 
 
 def alert_kind(ev):
-    return {"Tornado Warning": "Tornado", "Hurricane Warning": "Hurricane",
-            "Storm Surge Warning": "Hurricane", "Extreme Wind Warning": "Wind",
-            "Flash Flood Emergency": "Flood", "Blizzard Warning": "Blizzard"}.get(ev, "Alert")
+    return {"Tornado Warning": "Tornado", "Tornado Watch": "Tornado", "Hurricane Warning": "Hurricane",
+            "Storm Surge Warning": "Hurricane", "Extreme Wind Warning": "Wind", "High Wind Warning": "Wind",
+            "Flash Flood Emergency": "Flood", "Blizzard Warning": "Blizzard", "Ice Storm Warning": "Blizzard",
+            "Extreme Cold Warning": "Cold", "Extreme Heat Warning": "Heat",
+            "Excessive Heat Warning": "Heat"}.get(ev, "Alert")
+
+
+def ekind(cid, t):
+    if cid == "floods":
+        return "Flood"
+    if cid == "snow":
+        return "Blizzard"
+    if cid == "tempExtremes":
+        return "Cold" if any(w in t.lower() for w in ("cold", "freez", "frost", "snap")) else "Heat"
+    return storm_kind(t)
+
+
+def eo_poly(g):
+    try:
+        ring = g["coordinates"][0]
+        lon = sum(c[0] for c in ring) / len(ring)
+        lat = sum(c[1] for c in ring) / len(ring)
+        return {"type": "Point", "coordinates": [lon, lat], "date": g.get("date", ""),
+                "_rad": max(hav(lat, lon, c[1], c[0]) for c in ring)}
+    except Exception:
+        return None
 
 
 def get_eonet(y, m, live, whole=False):
+    cats = "severeStorms,floods,snow,tempExtremes"
     if whole:
-        p = {"status": "all", "start": f"{y}-01-01", "end": f"{y}-12-31",
-             "category": "severeStorms,floods"}
+        ps = [{"status": "all", "start": f"{y}-01-01", "end": f"{y}-12-31", "category": cats}]
     elif live:
-        p = {"status": "open", "days": 60, "category": "severeStorms,floods"}
+        ps = [{"status": "open", "days": 20, "category": "severeStorms"},
+              {"status": "all", "days": 45, "category": "floods"},
+              {"status": "open", "days": 30, "category": "snow,tempExtremes"}]
     else:
         last = calendar.monthrange(y, m)[1]
-        p = {"status": "all", "start": f"{y}-{m:02d}-01", "end": f"{y}-{m:02d}-{last}",
-             "category": "severeStorms,floods"}
-    for i in range(3):
-        try:
-            r = (SES if i == 0 else requests).get(EONET, params=p, headers=HDR, timeout=25)
-            r.raise_for_status()
-            break
-        except requests.RequestException:
-            if i == 2: raise
-            time.sleep(1.5)
+        ps = [{"status": "all", "start": f"{y}-{m:02d}-01", "end": f"{y}-{m:02d}-{last}", "category": cats}]
+    evs, err = [], None
+    for p in ps:
+        for i in range(3):
+            try:
+                r = (SES if i == 0 else requests).get(EONET, params=p, headers=HDR, timeout=25)
+                r.raise_for_status()
+                evs += r.json().get("events", [])
+                break
+            except (requests.RequestException, ValueError) as e:
+                err = e
+                if i < 2:
+                    time.sleep(1.5)
+    if not evs and err:
+        raise err
     out = []
-    for ev in r.json().get("events", []):
-        pts = [g for g in ev.get("geometry", []) if g.get("type") == "Point"]
+    for ev in evs:
+        geo = ev.get("geometry", [])
+        pts = [g for g in geo if g.get("type") == "Point"]
+        if not pts:
+            pts = [q for q in (eo_poly(g) for g in geo if g.get("type") == "Polygon") if q]
         if not pts:
             continue
         pts.sort(key=lambda g: g.get("date", ""))
         g = pts[-1]
         lon, lat = g["coordinates"][:2]
-        flood = ev["categories"][0]["id"] == "floods"
+        cid = ev["categories"][0]["id"]
+        flood = cid == "floods"
         mag = g.get("magnitudeValue")
         unit = (g.get("magnitudeUnit") or "").lower()
         kmh = (mag * 1.852 if "kt" in unit else mag * 1.609 if "mph" in unit else mag) if mag else None
         day = g.get("date", "")[:10]
-        if flood:
+        if cid in ("snow", "tempExtremes"):
+            desc = f"{'Heavy snow' if cid == 'snow' else 'Temperature extreme'} reported, last update {day}."
+        elif flood:
             desc = f"Flooding reported, last update {day}. Rivers or coasts are overflowing; follow local authorities."
         elif kmh:
             desc = f"{cat(kmh)} with sustained winds near {kmh:.0f} km/h. Last fix {day}; dashed line is the projected path."
         else:
             desc = f"Active storm system, last fix {day}. Dashed line is the projected path."
         track = [(q["coordinates"][1], q["coordinates"][0]) for q in pts]
-        out.append({"lat": lat, "lon": lon, "sev": 2 if flood else 3, "title": ev["title"],
-                    "desc": desc, "kind": "Flood" if flood else storm_kind(ev["title"]),
-                    "radius": 70 if flood else 120 + (mag or 60) * 2,
-                    "track": track, "fc": [] if flood else project(track)})
+        out.append({"lat": lat, "lon": lon, "sev": 3 if cid == "severeStorms" else 2, "title": ev["title"],
+                    "desc": desc, "kind": ekind(cid, ev["title"]),
+                    "radius": max(15, min(300, g.get("_rad", 70))) if cid != "severeStorms" else 120 + (mag or 60) * 2,
+                    "track": track, "fc": [] if cid != "severeStorms" else project(track)})
     return out
 
 
 def get_nws():
     r = SES.get(NWS, params={"event": NWS_EVENTS}, headers=HDR, timeout=25)
     r.raise_for_status()
-    out = []
+    out, todo = [], []
+
+    def ring_of(g):
+        return g["coordinates"][0] if g["type"] == "Polygon" else g["coordinates"][0][0]
+
+    def add(pr, ring):
+        lon = sum(c[0] for c in ring) / len(ring)
+        lat = sum(c[1] for c in ring) / len(ring)
+        rad = max(hav(lat, lon, c[1], c[0]) for c in ring)
+        ev = pr["event"]
+        out.append({"lat": lat, "lon": lon, "sev": 3 if ev in NWS_HI else 2, "title": ev,
+                    "desc": (NWS_INFO.get(ev, "") + " Area: " + (pr.get("areaDesc") or "")[:100]).strip(),
+                    "kind": alert_kind(ev), "radius": max(10, rad), "track": [], "fc": []})
+
     for f in r.json().get("features", []):
         geom, pr = f.get("geometry"), f["properties"]
-        if not geom:
-            continue
         try:
-            ring = geom["coordinates"][0] if geom["type"] == "Polygon" else geom["coordinates"][0][0]
-            lon = sum(c[0] for c in ring) / len(ring)
-            lat = sum(c[1] for c in ring) / len(ring)
-            rad = max(hav(lat, lon, c[1], c[0]) for c in ring)
+            if geom:
+                add(pr, ring_of(geom))
+            elif pr.get("affectedZones"):
+                todo.append(pr)
         except Exception:
             continue
-        ev = pr["event"]
-        out.append({"lat": lat, "lon": lon, "sev": 3 if ev != "Flash Flood Emergency" else 2,
-                    "title": ev, "desc": (NWS_INFO.get(ev, "") + " Area: " + (pr.get("areaDesc") or "")[:100]).strip(), "kind": alert_kind(ev),
-                    "radius": max(10, rad), "track": [], "fc": []})
+
+    def zone(pr):
+        try:
+            z = SES.get(pr["affectedZones"][0], headers=HDR, timeout=15).json().get("geometry")
+            return pr, ring_of(z)
+        except Exception:
+            return pr, None
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for pr, ring in ex.map(zone, todo[:30]):
+            if ring:
+                try:
+                    add(pr, ring)
+                except Exception:
+                    pass
     return out
 
 
@@ -172,7 +237,7 @@ def get_winds(points, date, hour):
     urls = [FORECAST, ARCHIVE] if date >= today - dt.timedelta(days=80) else [ARCHIVE, FORECAST]
     params = {"latitude": ",".join(f"{p[0]:.3f}" for p in points),
               "longitude": ",".join(f"{p[1]:.3f}" for p in points),
-              "hourly": "wind_gusts_10m,precipitation", "start_date": date.isoformat(),
+              "hourly": "wind_gusts_10m,precipitation,temperature_2m,snowfall", "start_date": date.isoformat(),
               "end_date": date.isoformat(), "timezone": "GMT"}
     for url in urls:
         try:
@@ -186,15 +251,27 @@ def get_winds(points, date, hour):
                 h = d["hourly"]
                 gust = (h.get("wind_gusts_10m") or [None] * 24)[hour]
                 rain = (h.get("precipitation") or [None] * 24)[hour]
-                if gust is not None and gust >= 100:
-                    out.append({"lat": la, "lon": lo, "sev": 3 if gust >= 130 else 2,
-                                "title": "Violent winds", "kind": "Wind", "radius": 90,
-                                "desc": f"Gusts up to {gust:.0f} km/h, {'hurricane-force' if gust >= 118 else 'damaging'}. Trees, roofs and power lines at risk.", "track": [], "fc": []})
+                temp = (h.get("temperature_2m") or [None] * 24)[hour]
+                snow = (h.get("snowfall") or [None] * 24)[hour]
+
+                def ev(sev, title, kind, rad, desc):
+                    out.append({"lat": la, "lon": lo, "sev": sev, "title": title, "kind": kind,
+                                "radius": rad, "desc": desc, "track": [], "fc": []})
+                if gust is not None and gust >= 90:
+                    ev(3 if gust >= 130 else 2, "Violent winds", "Wind", 90,
+                       f"Gusts up to {gust:.0f} km/h, {'hurricane-force' if gust >= 118 else 'damaging'}. Trees, roofs and power lines at risk.")
                 if rain is not None and rain >= 30:
-                    out.append({"lat": la, "lon": lo, "sev": 3 if rain >= 50 else 2,
-                                "title": "Extreme rainfall", "kind": "Flood", "radius": 60,
-                                "desc": f"{rain:.0f} mm of rain in one hour. Flash flooding likely; streets and low-lying areas at risk.",
-                                "track": [], "fc": []})
+                    ev(3 if rain >= 50 else 2, "Extreme rainfall", "Flood", 60,
+                       f"{rain:.0f} mm of rain in one hour. Flash flooding likely; streets and low-lying areas at risk.")
+                if temp is not None and temp >= 43:
+                    ev(3 if temp >= 47 else 2, "Extreme heat", "Heat", 90,
+                       f"{temp:.0f} \u00b0C air temperature. Dangerous heat; stay hydrated and avoid exertion.")
+                if temp is not None and temp <= -35:
+                    ev(3 if temp <= -42 else 2, "Extreme cold", "Cold", 90,
+                       f"{temp:.0f} \u00b0C air temperature. Frostbite can set in within minutes on bare skin.")
+                if snow is not None and snow >= 2 and (gust or 0) >= 50:
+                    ev(3 if snow >= 4 else 2, "Blizzard conditions", "Blizzard", 80,
+                       f"{snow:.1f} cm of snow per hour with {gust:.0f} km/h gusts. Whiteout visibility, dangerous travel.")
             return out
         except Exception:
             continue
@@ -545,6 +622,8 @@ def style(it):
     color, tag = SEV[it["sev"]]
     if it.get("db"):
         color, tag = KIND_COL.get(it["kind"], color), it["tag"]
+    elif it["kind"] == "Flood":
+        color = KIND_COL["Flood"]
     return color, tag
 
 
@@ -1202,7 +1281,7 @@ KIND_COL.setdefault("Alert", "#e5534b")
 LOWK = ("Flood", "Fire")
 FF = "Floods & Fires"
 ORDER = ["Tornado", "Hurricane", "Blizzard", "Storm", "Wind", "Alert", "Quake", "Heat", "Cold", FF]
-KIND_COL.setdefault(FF, "#8a96d6")
+KIND_COL["Flood"] = KIND_COL[FF] = "#4c85f0"
 
 
 def gkey(k):
@@ -1842,9 +1921,16 @@ class App(tk.Tk):
         if self.flt != "All" and not any(gkey(e["kind"]) == self.flt for e in base):
             self.flt = "All"
         self._base = base
-        items = [e for e in base if self.flt in ("All", gkey(e["kind"]))]
+        items = [e for e in base if self.vis(e["kind"])]
         self.scan_id += 1
         self.show(items, f"RECORDS · {d0}s" if d0 else "ALL-TIME RECORDS", None)
+
+    def vis(self, kind):
+        return gkey(kind) == self.flt if self.flt != "All" else kind not in LOWK
+
+    def hid(self):
+        h = sum(1 for x in getattr(self, "_base", []) if x["kind"] in LOWK)
+        return f"  ·  {h} flood/fire hidden" if h and self.flt == "All" else ""
 
     def pick_kind(self, k):
         self.flt = "All" if self.flt == k else k
@@ -1992,7 +2078,7 @@ class App(tk.Tk):
                 return push([], True)
             jobs = []
             cached = self.ev_cache.get(key)
-            dk = f"v3-{y}-{m}-{int(whole)}-{int(live)}"
+            dk = f"v5-{y}-{m}-{int(whole)}-{int(live)}"
             if cached is None:
                 cached = ev_load(dk, 600 if live else 2592000)
             if vo:
@@ -2059,10 +2145,11 @@ class App(tk.Tk):
         stats_bar(self.statsbar, [], None)
         self.stab["events"].configure(text="Events")
         self.groups, self._anim_n = {}, 0
+        self.cv.yview_moveto(0)
 
     def count_status(self, label):
         n = len(self.items)
-        self.status.configure(text=f"{n} EXTREME EVENT{'S' if n != 1 else ''} · {label}{'  ·  ' + self.flt if self.flt != 'All' else ''}", fg=TEXT)
+        self.status.configure(text=f"{n} EXTREME EVENT{'S' if n != 1 else ''} · {label}{'  ·  ' + self.flt if self.flt != 'All' else ''}{self.hid()}", fg=TEXT)
         self.stab["events"].configure(text=f"Events  {n}")
         stats_bar(self.statsbar, getattr(self, "_base", self.items), self.pick_kind, self.flt)
         if self.f != 1.0:
@@ -2072,6 +2159,7 @@ class App(tk.Tk):
         self.begin()
         if not items:
             self.status.configure(text=f"Nothing extreme found · {date}", fg="#7fb77e")
+            stats_bar(self.statsbar, getattr(self, "_base", []), self.pick_kind, self.flt)
             return
         for it in items:
             self.add_card(it)
@@ -2095,7 +2183,7 @@ class App(tk.Tk):
             self.flt = "All"
         new = []
         for it in its:
-            if self.flt != "All" and gkey(it["kind"]) != self.flt:
+            if not self.vis(it["kind"]):
                 continue
             k = (it["title"], round(it["lat"], 2), round(it["lon"], 2))
             if k not in self._seen:
@@ -2107,6 +2195,7 @@ class App(tk.Tk):
         if not self._seen:
             if final:
                 self.status.configure(text=f"Nothing extreme found · {label}", fg="#7fb77e")
+            stats_bar(self.statsbar, self._acc, self.pick_kind, self.flt)
             return
         self.count_status(label)
 
