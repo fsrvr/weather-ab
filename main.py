@@ -11,7 +11,7 @@ FORECAST = "https://api.open-meteo.com/v1/forecast"
 ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 EONET = "https://eonet.gsfc.nasa.gov/api/v3/events"
 NWS = "https://api.weather.gov/alerts/active"
-NWS_EVENTS = "Tornado Warning,Extreme Wind Warning,Flash Flood Emergency,Hurricane Warning,Storm Surge Warning"
+NWS_EVENTS = "Tornado Warning,Extreme Wind Warning,Flash Flood Emergency,Hurricane Warning,Storm Surge Warning,Blizzard Warning"
 HDR = {"User-Agent": "WeatherAbnormalityTracker/4.0 (github project)"}
 RESAMPLE = Image.Resampling.BILINEAR
 SES = requests.Session()
@@ -56,6 +56,7 @@ NWS_INFO = {
     "Flash Flood Emergency": "Catastrophic flash flooding is underway. Move to higher ground now.",
     "Hurricane Warning": "Hurricane conditions expected within 36 hours. Finish preparations and follow evacuation orders.",
     "Storm Surge Warning": "Life-threatening flooding from rising seawater expected near the coast.",
+    "Blizzard Warning": "Heavy snow and strong wind cause whiteout conditions. Avoid all travel.",
 }
 def cat(k):
     for lim, n in ((252, "Category 5 hurricane"), (209, "Category 4 hurricane"), (178, "Category 3 hurricane"),
@@ -82,12 +83,29 @@ def project(track, steps=4):
     return [(max(-85, min(85, a2 + dla * k)), o2 + dlo * k) for k in range(1, steps + 1)]
 
 
+def storm_kind(title):
+    t = title.lower()
+    if "tornado" in t:
+        return "Tornado"
+    if any(w in t for w in ("blizzard", "winter", "snow", "ice storm")):
+        return "Blizzard"
+    if any(w in t for w in ("hurricane", "typhoon", "cyclone", "tropical", "depression")):
+        return "Hurricane"
+    return "Storm"
+
+
+def alert_kind(ev):
+    return {"Tornado Warning": "Tornado", "Hurricane Warning": "Hurricane",
+            "Storm Surge Warning": "Hurricane", "Extreme Wind Warning": "Wind",
+            "Flash Flood Emergency": "Flood", "Blizzard Warning": "Blizzard"}.get(ev, "Alert")
+
+
 def get_eonet(y, m, live, whole=False):
     if whole:
         p = {"status": "all", "start": f"{y}-01-01", "end": f"{y}-12-31",
              "category": "severeStorms,floods"}
     elif live:
-        p = {"status": "open", "days": 20, "category": "severeStorms,floods"}
+        p = {"status": "open", "days": 60, "category": "severeStorms,floods"}
     else:
         last = calendar.monthrange(y, m)[1]
         p = {"status": "all", "start": f"{y}-{m:02d}-01", "end": f"{y}-{m:02d}-{last}",
@@ -121,7 +139,7 @@ def get_eonet(y, m, live, whole=False):
             desc = f"Active storm system, last fix {day}. Dashed line is the projected path."
         track = [(q["coordinates"][1], q["coordinates"][0]) for q in pts]
         out.append({"lat": lat, "lon": lon, "sev": 2 if flood else 3, "title": ev["title"],
-                    "desc": desc, "kind": "Flood" if flood else "Storm",
+                    "desc": desc, "kind": "Flood" if flood else storm_kind(ev["title"]),
                     "radius": 70 if flood else 120 + (mag or 60) * 2,
                     "track": track, "fc": [] if flood else project(track)})
     return out
@@ -144,7 +162,7 @@ def get_nws():
             continue
         ev = pr["event"]
         out.append({"lat": lat, "lon": lon, "sev": 3 if ev != "Flash Flood Emergency" else 2,
-                    "title": ev, "desc": (NWS_INFO.get(ev, "") + " Area: " + (pr.get("areaDesc") or "")[:100]).strip(), "kind": "Alert",
+                    "title": ev, "desc": (NWS_INFO.get(ev, "") + " Area: " + (pr.get("areaDesc") or "")[:100]).strip(), "kind": alert_kind(ev),
                     "radius": max(10, rad), "track": [], "fc": []})
     return out
 
@@ -1079,7 +1097,7 @@ def blend(c1, c2, t):
 
 
 class DatePicker(tk.Canvas):
-    RH, W, H = 32, 364, 160
+    RH, W, H = 28, 210, 124
     MONTHS = ["January", "February", "March", "April", "May", "June", "July",
               "August", "September", "October", "November", "December"]
 
@@ -1087,7 +1105,7 @@ class DatePicker(tk.Canvas):
         super().__init__(master, width=self.W, height=self.H, bg=SURF, highlightthickness=0)
         now = dt.datetime.now(dt.timezone.utc)
         self.years = list(range(2000, now.year + 1))
-        self.cx = [120, 270]
+        self.cx = [72, 168]
         self.fs = 1.0
         self.data = [self.MONTHS, [str(y) for y in self.years]]
         self.pos = [float(now.month - 1), float(len(self.years) - 1)]
@@ -1181,19 +1199,125 @@ KIND_COL.setdefault("Storm", "#4fa8e8")
 KIND_COL.setdefault("Alert", "#e5534b")
 
 
-def stats_bar(fr, items, on_click):
+LOWK = ("Flood", "Fire")
+FF = "Floods & Fires"
+ORDER = ["Tornado", "Hurricane", "Blizzard", "Storm", "Wind", "Alert", "Quake", "Heat", "Cold", FF]
+KIND_COL.setdefault(FF, "#8a96d6")
+
+
+def gkey(k):
+    return FF if k in LOWK else k
+
+
+def pill_style(b, on=False):
+    b.configure(bg=blend(SURF2, ACCENT, .18) if on else SURF, fg=ACCENT if on else MUTED,
+                activebackground=blend(SURF2, ACCENT, .28) if on else SURF2,
+                activeforeground=ACCENT if on else TEXT, highlightthickness=1,
+                highlightbackground=blend(SURF2, ACCENT, .5) if on else BORDER)
+
+
+def pill_hover(b, is_on):
+    b.bind("<Enter>", lambda e: b.configure(fg=ACCENT if is_on() else TEXT))
+    b.bind("<Leave>", lambda e: b.configure(fg=ACCENT if is_on() else MUTED))
+
+
+def stats_bar(fr, items, on_click, active="All"):
     for w in fr.winfo_children():
         w.destroy()
     c = {}
     for it in items:
-        c[it["kind"]] = c.get(it["kind"], 0) + 1
-    for i, (k, n) in enumerate(sorted(c.items(), key=lambda x: -x[1])):
-        col = KIND_COL.get(k, ACCENT)
-        tk.Button(fr, text=f"{k}  {n}", command=lambda k=k: on_click(k), bg=SURF2, fg=col,
-                  activebackground=BORDER, activeforeground=col, relief="flat", bd=0, padx=10,
-                  pady=4, cursor="hand2", font=(SANS, 9, "bold")
+        k = gkey(it["kind"])
+        c[k] = c.get(k, 0) + 1
+    for i, k in enumerate(sorted(c, key=lambda k: ORDER.index(k) if k in ORDER else 99)):
+        col, on = KIND_COL.get(k, ACCENT), k == active
+        lab = "Flood/Fire" if k == FF else k
+        tk.Button(fr, text=f"{lab}  {c[k]}", command=lambda k=k: on_click(k), fg=col,
+                  bg=blend(SURF, col, .25) if on else SURF, activebackground=SURF2,
+                  activeforeground=col, relief="flat", bd=0, padx=6, pady=4, cursor="hand2",
+                  font=(SANS, 9, "bold"), highlightthickness=1,
+                  highlightbackground=col if on else BORDER
                   ).grid(row=i // 3, column=i % 3, padx=(0, 6), pady=(0, 6), sticky="ew")
         fr.columnconfigure(i % 3, weight=1)
+
+
+class Wheel(tk.Canvas):
+    RH, H = 28, 124
+
+    def __init__(self, master, items, on_change, w=210):
+        super().__init__(master, width=w, height=self.H, bg=SURF, highlightthickness=0)
+        self.items, self.on_change, self.w0 = items, on_change, w
+        self.pos = self.tgt = 0.0
+        self.run, self.moved, self.last = False, 0, 0
+        self.bind("<Configure>", lambda e: self.draw())
+        self.bind("<ButtonPress-1>", self.press)
+        self.bind("<B1-Motion>", self.drag)
+        self.bind("<ButtonRelease-1>", self.release)
+        self.bind("<Button-4>", lambda e: self.step(-1))
+        self.bind("<Button-5>", lambda e: self.step(1))
+        self.bind("<MouseWheel>", lambda e: self.step(-1 if e.delta > 0 else 1))
+
+    def scale(self, f):
+        self.RH, self.H = int(28 * f), int(124 * f)
+        self.configure(width=int(self.w0 * f), height=self.H)
+        self.draw()
+
+    def get(self):
+        i = int(round(self.tgt))
+        return None if i == 0 else int(self.items[i][:4])
+
+    def cl(self, v):
+        return float(max(0, min(len(self.items) - 1, v)))
+
+    def press(self, e):
+        self.last, self.moved = e.y, 0
+
+    def drag(self, e):
+        self.moved += abs(e.y - self.last)
+        self.pos = self.tgt = self.cl(self.pos - (e.y - self.last) / self.RH)
+        self.last = e.y
+        self.draw()
+
+    def release(self, e):
+        if self.moved < 4:
+            self.tgt = self.cl(round(self.pos + (e.y - self.H / 2) / self.RH))
+        else:
+            self.tgt = self.cl(round(self.pos))
+        self.kick()
+
+    def step(self, d):
+        self.tgt = self.cl(round(self.tgt) + d)
+        self.kick()
+
+    def kick(self):
+        if not self.run:
+            self.run = True
+            self.after(16, self.loop)
+
+    def loop(self):
+        d = self.tgt - self.pos
+        if abs(d) > 0.01:
+            self.pos += d * 0.3
+            self.draw()
+            self.after(16, self.loop)
+        else:
+            self.pos = self.tgt
+            self.draw()
+            self.run = False
+            self.on_change()
+
+    def draw(self):
+        self.delete("all")
+        w, mid = self.winfo_width(), self.H / 2
+        if w < 2:
+            return
+        self.create_rectangle(8, mid - self.RH / 2, w - 8, mid + self.RH / 2, fill=SURF2, outline="")
+        p = self.pos
+        for i in range(int(round(p)) - 2, int(round(p)) + 3):
+            if 0 <= i < len(self.items):
+                d = abs(i - p)
+                self.create_text(w / 2, mid + (i - p) * self.RH, text=self.items[i],
+                                 fill=blend(TEXT, SURF, min(1, d / 2.5)),
+                                 font=(SANS, 14 if d < 0.5 else 11, "bold" if d < 0.5 else "normal"))
 
 
 # ---------------- app ----------------
@@ -1215,6 +1339,8 @@ class App(tk.Tk):
     _draining, _fsid, _last, _wbox = False, None, None, None
     def __init__(self):
         super().__init__()
+        for w in ("Button", "Menubutton", "Checkbutton"):
+            self.option_add(f"*{w}.highlightThickness", 0)
         self.title("Extreme Weather Tracker")
         self.geometry("1360x820")
         self.configure(bg=BG)
@@ -1241,22 +1367,20 @@ class App(tk.Tk):
         self.lcv.bind("<Configure>", lambda e: self.fit_left())
 
         head = tk.Frame(left, bg=BG)
-        head.pack(fill="x", padx=28, pady=(28, 0))
+        head.pack(fill="x", padx=28, pady=(16, 0))
         tk.Label(head, text="●", bg=BG, fg=RED, font=(SANS, 10)).pack(side="left")
         tk.Label(head, text="LIVE", bg=BG, fg=MUTED, font=(SANS, 9, "bold")).pack(side="left", padx=(5, 0))
-        tk.Label(left, text="Extreme weather,\nright now.", bg=BG, fg=TEXT, justify="left",
-                 anchor="w", font=(SANS, 26, "bold")).pack(fill="x", padx=28, pady=(8, 4))
+        tk.Label(left, text="Extreme weather, right now.", bg=BG, fg=TEXT, justify="left",
+                 anchor="w", font=(SANS, 19, "bold")).pack(fill="x", padx=28, pady=(2, 2))
         tk.Label(left, text="Hurricanes, floods, tornadoes and 100+ km/h winds.", bg=BG, fg=MUTED,
-                 justify="left", anchor="w", wraplength=360, font=(SERIF, 13)).pack(fill="x", padx=28)
+                 justify="left", anchor="w", wraplength=360, font=(SERIF, 11)).pack(fill="x", padx=28)
 
         self.loc = entry(left)
-        self.loc.pack(fill="x", padx=28, pady=(20, 0), ipady=8)
+        self.loc.pack(fill="x", padx=28, pady=(10, 0), ipady=6)
         self.loc.bind("<Return>", lambda e: self.search())
-        tk.Label(left, text="Type a city and press Enter to fly there", bg=BG, fg=MUTED,
-                 anchor="w", font=(SANS, 9)).pack(fill="x", padx=30, pady=(3, 0))
 
         tabs = tk.Frame(left, bg=BG)
-        tabs.pack(fill="x", padx=28, pady=(16, 0))
+        tabs.pack(fill="x", padx=28, pady=(10, 0))
         self.tab = {}
         for key, label in (("live", "Live"), ("archive", "Archive")):
             b = tk.Button(tabs, text=label, command=lambda k=key: self.set_mode(k), relief="flat",
@@ -1264,13 +1388,14 @@ class App(tk.Tk):
                           activebackground=BORDER, activeforeground=TEXT)
             b.pack(side="left", padx=(0, 6))
             self.tab[key] = b
+            pill_hover(b, lambda k=key: self.mode == k)
         tk.Button(tabs, text="Surprise me  ↻", command=self.surprise, relief="flat", bd=0, padx=14,
                   pady=6, cursor="hand2", font=(SANS, 10), bg=BG, fg=MUTED,
-                  activebackground=BORDER, activeforeground=TEXT).pack(side="right")
+                  activebackground=BORDER, activeforeground=TEXT, highlightthickness=1,
+                  highlightbackground=BORDER).pack(side="right")
         self.ctrl = tk.Frame(left, bg=BG)
-        self.ctrl.pack(fill="x", padx=28, pady=(12, 0))
+        self.ctrl.pack(fill="x", padx=28, pady=(10, 0))
         srow = tk.Frame(left, bg=BG)
-        srow.pack(fill="x", padx=28, pady=(10, 0), before=self.ctrl)
         self.stab = {}
         for key, label in (("filters", "Filters"), ("events", "Events")):
             b = tk.Button(srow, text=label, command=lambda k=key: self.sub(k), relief="flat", bd=0,
@@ -1279,33 +1404,32 @@ class App(tk.Tk):
             b.pack(side="left", padx=(0, 6))
             self.stab[key] = b
         self.pk = tk.Frame(self.ctrl, bg=BG)
-        self.pk.pack()
+        self.pk.pack(fill="x")
         self.picker = DatePicker(self.pk, lambda: self.schedule(500))
-        self.picker.pack()
+        self.picker.pack(side="left")
         self.whole = tk.BooleanVar(value=False)
-        tk.Checkbutton(self.pk, text="  Search the whole year", variable=self.whole,
-                       command=lambda: self.schedule(300), bg=BG, fg=TEXT, selectcolor=SURF2,
-                       activebackground=BG, activeforeground=ACCENT, highlightthickness=0, bd=0,
-                       cursor="hand2", font=(SANS, 10)).pack(anchor="w", pady=(10, 0))
-        tk.Label(self.pk, text="CONTINENT", bg=BG, fg=MUTED, font=(SANS, 8, "bold")).pack(anchor="w", pady=(12, 4))
-        self.cont_menu(self.pk).pack(fill="x")
+        opt = tk.Frame(self.pk, bg=BG)
+        opt.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        tk.Checkbutton(opt, text=" Whole year", variable=self.whole, command=lambda: self.schedule(300),
+                       bg=BG, fg=TEXT, selectcolor=SURF2, activebackground=BG, activeforeground=ACCENT,
+                       highlightthickness=0, bd=0, cursor="hand2", font=(SANS, 10)).pack(anchor="w", pady=(4, 0))
+        tk.Label(opt, text="CONTINENT", bg=BG, fg=MUTED, font=(SANS, 8, "bold")).pack(anchor="w", pady=(14, 4))
+        self.cont_menu(opt).pack(fill="x")
         self.chips = tk.Frame(self.ctrl, bg=BG)
         self.chip = {}
-        for i, k in enumerate(KINDS):
-            b = tk.Button(self.chips, text=k, command=lambda k=k: self.set_filter(k), relief="flat",
-                          bd=0, padx=8, pady=5, cursor="hand2", font=(SANS, 9, "bold"),
-                          activebackground=BORDER, activeforeground=TEXT)
-            b.grid(row=i // 4, column=i % 4, padx=(0, 6), pady=(0, 6), sticky="ew")
-            self.chips.columnconfigure(i % 4, weight=1)
-            self.chip[k] = b
-        self.cont_menu(self.chips).grid(row=3, column=0, columnspan=4, sticky='ew', pady=(6, 0))
+        self.dec = Wheel(self.chips, ["All time"] + [f"{d}s" for d in range(1880, 2030, 10)], self.show_archive)
+        self.dec.pack(side="left")
+        oa = tk.Frame(self.chips, bg=BG)
+        oa.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        tk.Label(oa, text="CONTINENT", bg=BG, fg=MUTED, font=(SANS, 8, "bold")).pack(anchor="w", pady=(4, 4))
+        self.cont_menu(oa).pack(fill="x")
         self.paint_tabs()
 
         self.sep = tk.Frame(left, bg=BORDER, height=1)
         self.sep.pack(fill="x", padx=28, pady=(14, 0))
         self.status = tk.Label(left, text="Starting...", bg=BG, fg=ACCENT, anchor="w",
                                justify="left", wraplength=360, font=(SANS, 10, "bold"))
-        self.status.pack(fill="x", padx=28, pady=(12, 6))
+        self.status.pack(fill="x", padx=28, pady=(8, 4))
         self.statsbar = tk.Frame(left, bg=BG)
         self.statsbar.pack(fill="x", padx=28, pady=(0, 4))
 
@@ -1374,7 +1498,7 @@ class App(tk.Tk):
             self.cont = tk.StringVar(value="Worldwide")
         om = tk.OptionMenu(parent, self.cont, *CONT, command=self.set_cont)
         om.configure(bg=SURF2, fg=TEXT, activebackground=BORDER, activeforeground=TEXT, relief="flat",
-                     bd=0, highlightthickness=0, font=(SANS, 11), anchor="w", cursor="hand2", padx=12, pady=6)
+                     bd=0, highlightthickness=0, font=(SANS, 10), anchor="w", cursor="hand2", padx=8, pady=5)
         om["menu"].configure(bg=SURF, fg=TEXT, activebackground=ACCENT, activeforeground=BG,
                              bd=0, font=(SANS, 10))
         return om
@@ -1669,40 +1793,22 @@ class App(tk.Tk):
         for wd in (self.d_title, self.d_desc, self.d_meta):
             wd.configure(wraplength=dw)
         p = self.picker
-        p.W, p.H, p.RH = int(364 * f), int(160 * f), int(32 * f)
-        p.cx = [int(120 * f), int(270 * f)]
+        p.W, p.H, p.RH = int(210 * f), int(124 * f), int(28 * f)
+        p.cx = [int(72 * f), int(168 * f)]
         p.fs = f
         p.configure(width=p.W, height=p.H)
         p.draw()
+        self.dec.scale(f)
         self.map.scaled.clear()
         self.map.redraw()
 
     def sub(self, which):
         self.subtab = which
-        hdr = [w for w in self.left.winfo_children() if isinstance(w, tk.Label)
-               and str(w.cget("text")).startswith(("Extreme weather", "Hurricanes, floods"))]
-        for w in hdr:
-            w.pack_forget()
-        if which == "filters":
-            for w in (self.sep, self.status, self.statsbar, self.wrap):
-                w.pack_forget()
-            for k, w in enumerate(hdr):
-                w.pack(fill="x", padx=28, pady=(8, 4) if k == 0 else 0, before=self.loc)
-            self.ctrl.pack(fill="x", padx=28, pady=(12, 0))
-        else:
-            self.ctrl.pack_forget()
-            self.sep.pack(fill="x", padx=28, pady=(14, 0))
-            self.status.pack(fill="x", padx=28, pady=(10, 4))
-            self.statsbar.pack(fill="x", padx=28, pady=(0, 4))
-            self.wrap.pack(fill="both", expand=True, padx=(22, 10), pady=(0, 14))
-        for k, b in self.stab.items():
-            on = k == which
-            b.configure(bg=SURF2 if on else BG, fg=ACCENT if on else MUTED)
 
     def paint_tabs(self):
         for k, b in self.tab.items():
             on = k == self.mode
-            b.configure(bg=SURF2 if on else BG, fg=ACCENT if on else MUTED)
+            pill_style(b, on)
         for k, b in self.chip.items():
             on = k == self.flt
             b.configure(bg=ACCENT if on else SURF2, fg=BG if on else TEXT)
@@ -1731,9 +1837,22 @@ class App(tk.Tk):
             self.show_archive()
 
     def show_archive(self):
-        items = [e for e in LEGENDS if self.flt in ("All", e["kind"]) and in_cont(e, self.cont.get())]
+        d0 = self.dec.get()
+        base = [e for e in LEGENDS if in_cont(e, self.cont.get()) and (d0 is None or e["year"] // 10 * 10 == d0)]
+        if self.flt != "All" and not any(gkey(e["kind"]) == self.flt for e in base):
+            self.flt = "All"
+        self._base = base
+        items = [e for e in base if self.flt in ("All", gkey(e["kind"]))]
         self.scan_id += 1
-        self.show(items, "ALL-TIME RECORDS", None)
+        self.show(items, f"RECORDS · {d0}s" if d0 else "ALL-TIME RECORDS", None)
+
+    def pick_kind(self, k):
+        self.flt = "All" if self.flt == k else k
+        if self.mode == "archive":
+            self.show_archive()
+        elif getattr(self, "_acc", None):
+            self._fsid = None
+            self.feed(list(self._acc), self._label, self.scan_id, True)
 
     def surprise(self):
         self.sub("filters")
@@ -1846,6 +1965,7 @@ class App(tk.Tk):
                 return
         else:
             self.scan_id += 1
+            self.flt = "All"
             self.status.configure(text="Looking for extreme events...", fg=ACCENT)
             self.start_eta(self.scan_id, "live" if live else "past")
             self.map.hold = True
@@ -1872,7 +1992,7 @@ class App(tk.Tk):
                 return push([], True)
             jobs = []
             cached = self.ev_cache.get(key)
-            dk = f"{y}-{m}-{int(whole)}-{int(live)}"
+            dk = f"v3-{y}-{m}-{int(whole)}-{int(live)}"
             if cached is None:
                 cached = ev_load(dk, 600 if live else 2592000)
             if vo:
@@ -1942,9 +2062,9 @@ class App(tk.Tk):
 
     def count_status(self, label):
         n = len(self.items)
-        self.status.configure(text=f"{n} EXTREME EVENT{'S' if n != 1 else ''} · {label}", fg=TEXT)
+        self.status.configure(text=f"{n} EXTREME EVENT{'S' if n != 1 else ''} · {label}{'  ·  ' + self.flt if self.flt != 'All' else ''}", fg=TEXT)
         self.stab["events"].configure(text=f"Events  {n}")
-        stats_bar(self.statsbar, self.items, self.jump_group)
+        stats_bar(self.statsbar, getattr(self, "_base", self.items), self.pick_kind, self.flt)
         if self.f != 1.0:
             self.scale_fonts(self.statsbar)
 
@@ -1963,9 +2083,20 @@ class App(tk.Tk):
         if self._fsid != sid:
             self._fsid, self._draining = sid, False
             self._seen, self._pend, self._label = set(), [], label
+            self._acc, self._accseen = [], set()
             self.begin()
+        for it in its:
+            ak = (it["title"], round(it["lat"], 2), round(it["lon"], 2))
+            if ak not in self._accseen:
+                self._accseen.add(ak)
+                self._acc.append(it)
+        self._base = self._acc
+        if self.flt != "All" and not any(gkey(x["kind"]) == self.flt for x in self._acc):
+            self.flt = "All"
         new = []
         for it in its:
+            if self.flt != "All" and gkey(it["kind"]) != self.flt:
+                continue
             k = (it["title"], round(it["lat"], 2), round(it["lon"], 2))
             if k not in self._seen:
                 self._seen.add(k)
@@ -2006,12 +2137,18 @@ class App(tk.Tk):
              "touched": False, "auto": False}
         hd.bind("<Button-1>", lambda e, g=g: self.toggle_group(g, True))
         self.groups[kind] = g
+        if kind == FF and self.flt == "All":
+            g["auto"], g["open"] = True, False
+            box.pack_forget()
+        for x in sorted(self.groups.values(), key=lambda x: ORDER.index(x["kind"]) if x["kind"] in ORDER else 99):
+            x["fr"].pack_forget()
+            x["fr"].pack(fill="x", pady=(8, 0))
         if self.f != 1.0:
             self.scale_fonts(hd)
         return g
 
     def group_head(self, g):
-        if g["n"] > 5 and g["open"] and not g["touched"] and not g["auto"]:
+        if g["n"] > 5 and g["open"] and not g["touched"] and not g["auto"] and self.flt == "All":
             g["auto"], g["open"] = True, False
             g["box"].pack_forget()
         ar = "▾" if g["open"] else "▸"
@@ -2063,7 +2200,7 @@ class App(tk.Tk):
         color, tag = style(it)
         self.map.add_mark({"lat": it["lat"], "lon": it["lon"], "color": color, "label": it["title"],
                            "radius": it["radius"], "track": it["track"], "fc": it["fc"]})
-        g = self.group(it["kind"], color)
+        g = self.group(gkey(it["kind"]), KIND_COL[FF] if it["kind"] in LOWK else color)
         card = tk.Frame(g["box"], bg=SURF, cursor="hand2")
         card.pack(fill="x", pady=5, padx=(0, 6))
         g["n"] += 1
@@ -2125,7 +2262,7 @@ class App(tk.Tk):
         self.detail.place(relx=0, rely=1, x=16, y=-34, anchor="sw")
         if getattr(self, "subtab", "events") != "events":
             self.sub("events")
-        g = self.groups.get(it["kind"])
+        g = self.groups.get(gkey(it["kind"]))
         if g and not g["open"]:
             self.toggle_group(g)
         if scroll:
