@@ -587,7 +587,7 @@ TUTORIAL = [
                     "or press Surprise me."),
     ("Continent", "Pick a continent to fly there and only show events inside it."),
     ("The map", "Drag to pan, scroll to zoom at the cursor. Click a circle to see its size, "
-                "track and facts."),
+                "track and facts. Click empty ground for a forecast."),
     ("Event cards", "Click a card on the left to fly to that event. Esc deselects."),
     ("Shortcuts", "Ctrl+F searches a city, Ctrl+Q quits, F1 opens usage. Reopen this tour "
                   "anytime from Help > Tutorial."),
@@ -611,7 +611,7 @@ Choose a continent to fly there and only show events inside it.
 
 MAP
 Drag to pan, scroll to zoom at the mouse. Click an event to see its size, track and facts.
-Click empty map or press Esc to deselect.
+Click empty map for that spot's forecast, Esc to close.
 
 SHORTCUTS
 Ctrl+F  search a city     Ctrl+Q  quit     Esc  deselect
@@ -630,6 +630,7 @@ def style(it):
 # ---------------- map ----------------
 class TileMap(tk.Canvas):
     MINZ, MAXZ = 2, 18
+    pin, SNAP, on_empty = None, 36, None
 
     def __init__(self, master, on_view, on_pick, on_error):
         super().__init__(master, bg=BG, highlightthickness=0, cursor="fleur")
@@ -806,20 +807,29 @@ class TileMap(tk.Canvas):
             if m > 1:
                 self.prefetch(self.vel[0] / m, self.vel[1] / m)
 
-    def _release(self, e):
-        if self._moved >= 5:
-            return self.on_view()
+    def hit(self, ex, ey):
         w, h = self.winfo_width(), self.winfo_height()
         cx, cy = self.world(self.lat, self.lon, self.fz)
         x0, y0 = cx - w / 2, cy - h / 2
         best, bd = None, 1e9
         for i, m in enumerate(self.marks):
             mx, my = self.world(m["lat"], m["lon"], self.fz)
-            d = math.hypot(mx - x0 - e.x, my - y0 - e.y)
-            if d <= max(16, self.px_radius(m)) and d < bd:
+            d = math.hypot(mx - x0 - ex, my - y0 - ey)
+            if d <= max(self.SNAP, self.px_radius(m)) and d < bd:
                 best, bd = i, d
+        return best
+
+    def _release(self, e):
+        if self._moved >= 5:
+            return self.on_view()
+        best = self.hit(e.x, e.y)
         self.select(best)
         self.on_pick(best)
+        if best is None and self.on_empty:
+            w, h = self.winfo_width(), self.winfo_height()
+            cx, cy = self.world(self.lat, self.lon, self.fz)
+            lat, lon = self.unworld(cx - w / 2 + e.x, cy - h / 2 + e.y, self.fz)
+            self.on_empty(lat, (lon + 180) % 360 - 180)
 
     # ----- tiles -----
     def _hover(self, e):
@@ -832,13 +842,7 @@ class TileMap(tk.Canvas):
         if t - getattr(self, "_hw", 0) > 0.25 and not self.anim:
             self._hw = t
             self.warm(e.x, e.y, int(round(self.fz)))
-        hit = False
-        for m in self.marks:
-            mx, my = self.world(m["lat"], m["lon"], self.fz)
-            if math.hypot(mx - x0 - e.x, my - y0 - e.y) <= max(16, self.px_radius(m)):
-                hit = True
-                break
-        c = "hand2" if hit else "fleur"
+        c = "hand2" if self.hit(e.x, e.y) is not None else "fleur"
         if c != self._cur:
             self._cur = c
             self.configure(cursor=c)
@@ -1156,6 +1160,10 @@ class TileMap(tk.Canvas):
                 rc = self.create_rectangle(bb[0] - 9, bb[1] - 4, bb[2] + 9, bb[3] + 4,
                                            fill=BG, outline=c, width=2 if on else 1)
                 self.tag_lower(rc, t)
+        if self.pin:
+            px, py = P(*self.pin)
+            self.create_oval(px - 10, py - 10, px + 10, py + 10, outline="white", width=2)
+            self.create_oval(px - 3, py - 3, px + 3, py + 3, fill="white", outline="")
         mpp = 156543.03 * max(0.05, math.cos(math.radians(self.lat))) / 2 ** fz
         for target_km in (1000, 500, 200, 100, 50, 20, 10, 5, 1):
             bar_px = target_km * 1000 / mpp
@@ -1399,6 +1407,16 @@ class Wheel(tk.Canvas):
                                  font=(SANS, 14 if d < 0.5 else 11, "bold" if d < 0.5 else "normal"))
 
 
+def wmo(c):
+    if c is None:
+        return "-"
+    for lim, t in ((0, "Clear"), (2, "Partly cloudy"), (3, "Overcast"), (48, "Fog"), (57, "Drizzle"),
+                   (67, "Rain"), (77, "Snow"), (82, "Showers"), (86, "Snow showers"), (99, "Thunderstorm")):
+        if c <= lim:
+            return t
+    return "-"
+
+
 # ---------------- app ----------------
 def button(parent, text, cmd, bg=SURF2, fg=TEXT, bold=False, **kw):
     return tk.Button(parent, text=text, command=cmd, bg=bg, fg=fg, activebackground=BORDER,
@@ -1560,6 +1578,18 @@ class App(tk.Tk):
         self.b_copy = button(bt, "Copy coords", self.copy_coords)
         self.b_copy.configure(font=(SANS, 10), padx=10, pady=4)
         self.b_copy.pack(side="left", padx=(6, 0))
+
+        self.fcp = tk.Frame(self.map, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        self.f_tag = tk.Label(self.fcp, bg=BG, fg=ACCENT, anchor="w", font=(SANS, 9, "bold"))
+        self.f_title = tk.Label(self.fcp, bg=BG, fg=TEXT, anchor="w", justify="left", wraplength=340,
+                                font=(SANS, 15, "bold"))
+        self.f_body = tk.Label(self.fcp, bg=BG, fg=MUTED, anchor="w", justify="left", font=(SANS, 10))
+        for wd, pad in ((self.f_tag, (12, 0)), (self.f_title, (2, 0)), (self.f_body, (8, 10))):
+            wd.pack(fill="x", padx=16, pady=pad)
+        b_close = button(self.fcp, "Close", self.drop_pin)
+        b_close.configure(font=(SANS, 10), padx=10, pady=4)
+        b_close.pack(anchor="w", padx=16, pady=(0, 14))
+        self.map.on_empty = self.show_forecast
 
         self.build_menubar()
         self.sub("filters")
@@ -2330,9 +2360,65 @@ class App(tk.Tk):
         self.pick_card(i, scroll=False)
         self.map.fly_to(it["lat"], it["lon"], max(4, min(10, z)), 1200, notify=False)
 
+    def drop_pin(self):
+        self.fcp.place_forget()
+        if self.map.pin:
+            self.map.pin = None
+            self.map.redraw()
+
+    def show_forecast(self, lat, lon):
+        self._fcid = getattr(self, "_fcid", 0) + 1
+        fid = self._fcid
+        self.map.pin = (lat, lon)
+        self.map.redraw()
+        self.f_tag.configure(text=f"FORECAST  ·  {lat:.2f}, {lon:.2f}")
+        self.f_title.configure(text="Loading...")
+        self.f_body.configure(text="")
+        self.detail.place_forget()
+        self.fcp.place(relx=0, rely=1, x=16, y=-34, anchor="sw")
+        self.fcp.lift()
+
+        def work():
+            place, text = {}, None
+            try:
+                place = requests.get("https://api.bigdatacloud.net/data/reverse-geocode-client",
+                                     params={"latitude": lat, "longitude": lon, "localityLanguage": "en"},
+                                     headers=HDR, timeout=10).json()
+            except Exception:
+                pass
+            try:
+                f = SES.get(FORECAST, params={
+                    "latitude": lat, "longitude": lon, "forecast_days": 6, "timezone": "auto",
+                    "current": "temperature_2m,apparent_temperature,wind_speed_10m,wind_gusts_10m,precipitation,weather_code",
+                    "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_gusts_10m_max"},
+                    headers=HDR, timeout=15).json()
+                fx = lambda v, p=0: "-" if v is None else f"{v:.{p}f}"
+                c, d = f["current"], f["daily"]
+                rows = [f"Now  {fx(c['temperature_2m'])}\u00b0C (feels {fx(c['apparent_temperature'])}\u00b0)  \u00b7  {wmo(c['weather_code'])}",
+                        f"Wind {fx(c['wind_speed_10m'])} km/h, gusts {fx(c['wind_gusts_10m'])}  \u00b7  rain {fx(c['precipitation'], 1)} mm", ""]
+                for k in range(len(d["time"])):
+                    day = dt.date.fromisoformat(d["time"][k]).strftime("%a")
+                    rows.append(f"{day}   {fx(d['temperature_2m_max'][k])}\u00b0 / {fx(d['temperature_2m_min'][k])}\u00b0   "
+                                f"{wmo(d['weather_code'][k])}   {fx(d['precipitation_sum'][k])} mm   gusts {fx(d['wind_gusts_10m_max'][k])}")
+                text = "\n".join(rows)
+            except Exception:
+                pass
+            ui(lambda: fid == self._fcid and self.fill_forecast(place, text))
+        threading.Thread(target=work, daemon=True).start()
+
+    def fill_forecast(self, place, text):
+        p = place or {}
+        bits = [x for x in (p.get("city") or p.get("locality"), p.get("principalSubdivision")) if x]
+        self.f_title.configure(text=p.get("countryName") or "Open sea / unnamed area")
+        near = ("Near " + ", ".join(bits) + "\n\n") if bits else ""
+        self.f_body.configure(text=near + (text or "Forecast unavailable. Check your connection."))
+        if self.f != 1.0:
+            self.scale_fonts(self.fcp)
+
     def pick_card(self, i, scroll=True):
         old, self.cur = self.cur, i
         if old is not None: self.paint(old, SURF)
+        self.drop_pin()
         if i is None:
             self.detail.place_forget()
             return
