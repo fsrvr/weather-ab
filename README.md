@@ -69,11 +69,22 @@ On Linux/macOS you can also run `./run.sh` (after `chmod +x run.sh`).
 - **Tutorial**: shown on first launch, reopen with F1 or Help > Tutorial.
 - **Shortcuts**: Ctrl+F search a city, Ctrl+Q quit, Esc deselect.
 
+## Recent Updates
+
+- **🗺️ Radar & Playback Enhancements:** RainViewer radar and play (▶) buttons now display the last 2 hours of rain radar with animated timestamps. Radar stays visible during zoom animations, tile redraws are batched, and playback ensures only fully loaded frames render. Controls are hidden in Archive mode and reappear in Live mode.
+- **⏸️ Radar Stop:** Pressing ⏸ or the Radar button again turns the radar completely off.
+- **⚠️ Europe Weather Alerts:** Live map scans now pull and display orange and red **MeteoAlarm** warnings directly onto the map.
+- **⭐ Favorites:** Added a ★ Save button on the forecast panel (or shortcut `Ctrl+D`) to bookmark locations, alongside a ★ Favorites menu to jump to or remove saved spots.
+- **⚙️ Unit Switching:** Added **View > Units** to seamlessly switch between metric (°C/km/h) and imperial (°F/mph) across cards, details, and forecasts.
+- **🌋 Archive Additions:** Expanded the historical archive with 5 major volcanic eruptions and 4 historic droughts, plus two new filter types (empty-map clicks no longer trigger forecasts in Archive mode).
+
 ## Data sources
 
 - NASA EONET: storms and floods
 - US National Weather Service: tornado and extreme wind alerts (live)
 - Open-Meteo: wind gusts and rainfall
+- RainViewer: radar overlay
+- MeteoAlarm: European alerts
 - Esri World Imagery: satellite map
 - Local archive: about 30 hand-picked record events built into main.py
 
