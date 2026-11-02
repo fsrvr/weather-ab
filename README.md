@@ -66,6 +66,11 @@ On Linux/macOS you can also run `./run.sh` (after `chmod +x run.sh`).
 - **Continent**: limit results to one continent and fly there (both tabs, also under View).
 - **Map**: drag to pan, scroll to zoom at the mouse, click an event for its size, track and facts.
 - **Menu bar**: Export events as JSON, Surprise me, previous/next month, fullscreen, usage.
+- **Radar**: rain radar overlay with play button (alpha, may lag).
+- **Favorites**: save places or events (Ctrl+D), jump to them from the Favorites menu.
+- **Filter box**: filter the event list by name or place (Ctrl+K).
+- **Units**: View > Units switches °C/km/h and °F/mph.
+- **PNG**: save the current map view as an image (Ctrl+P).
 - **Tutorial**: shown on first launch, reopen with F1 or Help > Tutorial.
 - **Shortcuts**: Ctrl+F search a city, Ctrl+Q quit, Esc deselect.
 
@@ -82,7 +87,8 @@ On Linux/macOS you can also run `./run.sh` (after `chmod +x run.sh`).
 
 - NASA EONET: storms and floods
 - US National Weather Service: tornado and extreme wind alerts (live)
-- Open-Meteo: wind gusts and rainfall
+- Open-Meteo: wind gusts, rainfall and past extremes (archive)
+- USGS: earthquakes
 - RainViewer: radar overlay
 - MeteoAlarm: European alerts
 - Esri World Imagery: satellite map

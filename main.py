@@ -17,7 +17,8 @@ RESAMPLE = Image.Resampling.BILINEAR
 SES = requests.Session()
 SES.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=32))
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "map")
-import calendar
+import calendar, re
+from extras import U, T, S, uconv, favs_load, favs_save, get_meteoalarm, radar_frames, rate_wait, get_quakes_past, get_extremes_past
 
 ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/"
 IMAGERY = ESRI + "World_Imagery/MapServer/tile/{z}/{y}/{x}"
@@ -110,6 +111,8 @@ def alert_kind(ev):
 
 
 def ekind(cid, t):
+    if cid == "wildfires":
+        return "Fire"
     if cid == "floods":
         return "Flood"
     if cid == "snow":
@@ -131,7 +134,7 @@ def eo_poly(g):
 
 
 def get_eonet(y, m, live, whole=False):
-    cats = "severeStorms,floods,snow,tempExtremes"
+    cats = "severeStorms,floods,snow,tempExtremes,wildfires"
     if whole:
         ps = [{"status": "all", "start": f"{y}-01-01", "end": f"{y}-12-31", "category": cats}]
     elif live:
@@ -174,6 +177,8 @@ def get_eonet(y, m, live, whole=False):
         day = g.get("date", "")[:10]
         if cid in ("snow", "tempExtremes"):
             desc = f"{'Heavy snow' if cid == 'snow' else 'Temperature extreme'} reported, last update {day}."
+        elif cid == "wildfires":
+            desc = f"Wildfire reported, last update {day}."
         elif flood:
             desc = f"Flooding reported, last update {day}. Rivers or coasts are overflowing; follow local authorities."
         elif kmh:
@@ -182,7 +187,7 @@ def get_eonet(y, m, live, whole=False):
             desc = f"Active storm system, last fix {day}. Dashed line is the projected path."
         track = [(q["coordinates"][1], q["coordinates"][0]) for q in pts]
         out.append({"lat": lat, "lon": lon, "sev": 3 if cid == "severeStorms" else 2, "title": ev["title"],
-                    "desc": desc, "kind": ekind(cid, ev["title"]),
+                    "desc": desc, "kind": ekind(cid, ev["title"]), "d0": pts[0].get("date", "")[:10] or None, "d1": day or None,
                     "radius": max(15, min(300, g.get("_rad", 70))) if cid != "severeStorms" else 120 + (mag or 60) * 2,
                     "track": track, "fc": [] if cid != "severeStorms" else project(track)})
     return out
@@ -203,7 +208,8 @@ def get_nws():
         ev = pr["event"]
         out.append({"lat": lat, "lon": lon, "sev": 3 if ev in NWS_HI else 2, "title": ev,
                     "desc": (NWS_INFO.get(ev, "") + " Area: " + (pr.get("areaDesc") or "")[:100]).strip(),
-                    "kind": alert_kind(ev), "radius": max(10, rad), "track": [], "fc": []})
+                    "kind": alert_kind(ev), "radius": max(10, rad), "track": [], "fc": [],
+                    "d0": dt.date.today().isoformat(), "d1": dt.date.today().isoformat()})
 
     for f in r.json().get("features", []):
         geom, pr = f.get("geometry"), f["properties"]
@@ -256,7 +262,8 @@ def get_winds(points, date, hour):
 
                 def ev(sev, title, kind, rad, desc):
                     out.append({"lat": la, "lon": lo, "sev": sev, "title": title, "kind": kind,
-                                "radius": rad, "desc": desc, "track": [], "fc": []})
+                                "radius": rad, "desc": desc, "track": [], "fc": [],
+                                "d0": date.isoformat(), "d1": date.isoformat()})
                 if gust is not None and gust >= 90:
                     ev(3 if gust >= 130 else 2, "Violent winds", "Wind", 90,
                        f"Gusts up to {gust:.0f} km/h, {'hurricane-force' if gust >= 118 else 'damaging'}. Trees, roofs and power lines at risk.")
@@ -294,7 +301,7 @@ def get_quakes():
                     "sev": 3 if mag >= 6.5 else 2,
                     "title": p.get("place", "Earthquake"),
                     "kind": "Quake",
-                    "desc": f"M{mag:.1f} earthquake.",
+                    "desc": f"M{mag:.1f} earthquake, {qd(p)}.", "d0": qd(p), "d1": qd(p),
                     "radius": int(20 + mag * 15),
                     "track": [], "fc": []})
     return out
@@ -311,7 +318,8 @@ def get_fires():
             continue
         lon, lat = pts[-1]["coordinates"][:2]
         out.append({"lat": lat, "lon": lon, "sev": 2, "title": ev["title"], "kind": "Fire",
-                    "desc": "Active wildfire.", "radius": 40, "track": [], "fc": []})
+                    "desc": "Active wildfire.", "radius": 40, "track": [], "fc": [],
+                    "d0": pts[-1].get("date", "")[:10] or None, "d1": pts[-1].get("date", "")[:10] or None})
     return out
 
 
@@ -557,6 +565,37 @@ TOP = {"Bridge Creek-Moore Tornado", "Tri-State Tornado", "El Reno Tornado",
        "Oymyakon Cold Record", "Mount Washington Gust", "Cyclone Olivia Gust",
        "Black Sunday Dust Storm"}
 LEGENDS = [e for e in LEGENDS if e["title"] in TOP]
+KINDS += ["Volcano", "Drought"]
+KIND_COL.update({"Volcano": "#ff4d6d", "Drought": "#c9a227"})
+LEGENDS += [
+    E("Mount Tambora", "Volcano", "1815-04", "10 April 1815", -8.25, 118.0, 300, "VEI 7",
+      "The largest eruption in recorded history. Its ash caused the Year Without a Summer in 1816.",
+      "~71,000 deaths · up to 150 km3 of ash and rock · Indonesia"),
+    E("Krakatoa", "Volcano", "1883-08", "27 August 1883", -6.10, 105.42, 400, "VEI 6",
+      "The explosion was heard about 4,800 km away and sent huge tsunamis across the strait.",
+      "~36,000 deaths · mostly from tsunamis · Indonesia"),
+    E("Mount Pinatubo", "Volcano", "1991-06", "15 June 1991", 15.13, 120.35, 250, "VEI 6",
+      "The second-largest eruption of the 20th century cooled the globe for about two years.",
+      "~850 deaths · ash column about 35 km high · Philippines"),
+    E("Mount St. Helens", "Volcano", "1980-05", "18 May 1980", 46.20, -122.18, 40, "VEI 5",
+      "A giant landslide and sideways blast flattened forest over 600 km2.",
+      "57 deaths · deadliest volcanic event in US history"),
+    E("Hunga Tonga", "Volcano", "2022-01", "15 January 2022", -20.54, -175.39, 500, "VEI 5-6",
+      "The blast was heard worldwide and the plume reached the mesosphere.",
+      "Pressure wave circled the Earth several times · few deaths · Tonga"),
+    E("Dust Bowl Drought", "Drought", "1934-05", "1930-1939", 37.0, -101.0, 700, "Decade-long",
+      "Drought and bare farmland turned the Great Plains into dust.",
+      "About 2.5 million people left the Plains states"),
+    E("Great North China Famine", "Drought", "1876-01", "1876-1879", 37.0, 113.0, 600, "Deadliest",
+      "Years of failed rains left northern China without harvests.",
+      "9-13 million deaths"),
+    E("Millennium Drought", "Drought", "2002-01", "1997-2009", -34.0, 144.0, 800, "13 years",
+      "Australia's longest modern drought hit the Murray-Darling basin hard.",
+      "Rivers and farms ran dry across the southeast"),
+    E("Horn of Africa Drought", "Drought", "2011-07", "2010-2012", 5.0, 45.0, 700, "Famine",
+      "Failed rains caused famine in Somalia and a regional crisis.",
+      "About 260,000 deaths in Somalia · 13 million people affected"),
+]
 
 # name: ((south, west, north, east), (center lat, center lon), zoom)
 CONT = {
@@ -618,12 +657,20 @@ Ctrl+F  search a city     Ctrl+Q  quit     Esc  deselect
 """
 
 
+def in_win(x, ws, we):
+    d0, d1 = x.get("d0"), x.get("d1")
+    return True if not d0 or not d1 else (d1 >= ws and d0 <= we)
+
+
+def qd(p):
+    return dt.datetime.fromtimestamp((p.get("time") or 0) / 1000, dt.timezone.utc).strftime("%Y-%m-%d")
+
+
 def style(it):
     color, tag = SEV[it["sev"]]
+    color = KIND_COL.get(it["kind"], color)
     if it.get("db"):
-        color, tag = KIND_COL.get(it["kind"], color), it["tag"]
-    elif it["kind"] == "Flood":
-        color = KIND_COL["Flood"]
+        tag = it["tag"]
     return color, tag
 
 
@@ -648,6 +695,10 @@ class TileMap(tk.Canvas):
         for _ in range(24):
             threading.Thread(target=self._worker, daemon=True).start()
         self.after(300, self.preload_world)
+        self.radar_on, self.frames, self.fidx, self.rplay = False, [], 0, False
+        self.rhost, self.rpil, self.rtk, self.rcrop, self.rpend = "", {}, {}, {}, set()
+        self.rpool = ThreadPoolExecutor(max_workers=4)
+        self.rfail, self._rerr, self._rneed, self._rrd = {}, False, set(), None
         self._rd, self._err = None, False
         self._ftk = None
         self.bind("<Configure>", lambda e: self.redraw())
@@ -736,6 +787,15 @@ class TileMap(tk.Canvas):
             else:
                 self.phase += 1
                 self._pulse()
+                if self.rplay and self.radar_on and self.frames and self.phase % 36 == 0:
+                    self.radar_warm()
+                    nf = len(self.frames)
+                    for k in range(1, nf + 1):
+                        j = (self.fidx + k) % nf
+                        if self.radar_ready_frame(j):
+                            self.fidx = j
+                            break
+                    self.redraw()
         finally:
             self.after(8 if self.anim else 33, self._tick)
 
@@ -1050,6 +1110,12 @@ class TileMap(tk.Canvas):
                 if im.size != sz:
                     im = im.resize(sz, Image.Resampling.NEAREST)
                 fr.paste(im, (px, py))
+                if self.radar_on and self.frames:
+                    rp, _k = self.radar_pil(zi, tx % n, ty)
+                    if rp is not None:
+                        if rp.size != sz:
+                            rp = rp.resize(sz, Image.Resampling.NEAREST)
+                        fr.paste(rp, (px, py), rp)
         if self._ftk is None or self._ftk.width() != w or self._ftk.height() != h:
             self._ftk = ImageTk.PhotoImage(fr)
         else:
@@ -1077,6 +1143,216 @@ class TileMap(tk.Canvas):
         t = self.ovl[key] = ImageTk.PhotoImage(im)
         return t
 
+    # ----- screenshot -----
+    def render(self):
+        from PIL import ImageFont
+        w, h = self.winfo_width(), self.winfo_height()
+        fz = self.fz
+        zi = max(0, min(19, int(round(fz))))
+        n = 2 ** zi
+        tsf = 256 * 2 ** (fz - zi)
+        cx, cy = self.world(self.lat, self.lon, fz)
+        x0, y0 = cx - w / 2, cy - h / 2
+        fr = Image.new("RGB", (w, h), (20, 18, 16))
+        for tx in range(int(x0 // tsf), int((x0 + w) // tsf) + 1):
+            for ty in range(int(y0 // tsf), int((y0 + h) // tsf) + 1):
+                if ty < 0 or ty >= n:
+                    continue
+                im = self.tile_pil(zi, tx % n, ty)
+                if im is None:
+                    continue
+                px, py = int(round(tx * tsf - x0)), int(round(ty * tsf - y0))
+                nx, ny = int(round((tx + 1) * tsf - x0)), int(round((ty + 1) * tsf - y0))
+                sz = (max(1, nx - px), max(1, ny - py))
+                if im.size != sz:
+                    im = im.resize(sz, RESAMPLE)
+                fr.paste(im, (px, py))
+                if self.radar_on and self.frames:
+                    rp, _k = self.radar_pil(zi, tx % n, ty)
+                    if rp is not None:
+                        if rp.size != sz:
+                            rp = rp.resize(sz, RESAMPLE)
+                        fr.paste(rp, (px, py), rp)
+        d = ImageDraw.Draw(fr, "RGBA")
+        try:
+            font = ImageFont.load_default(size=13)
+        except TypeError:
+            font = ImageFont.load_default()
+
+        def P(lat, lon):
+            px, py = self.world(lat, lon, fz)
+            return px - x0, py - y0
+
+        def text_box(cx_, cy_, txt, col, outline=None):
+            bb = d.textbbox((0, 0), txt, font=font)
+            tw, th = bb[2] - bb[0], bb[3] - bb[1]
+            if outline:
+                d.rectangle((cx_ - tw / 2 - 8, cy_ - th / 2 - 5, cx_ + tw / 2 + 8, cy_ + th / 2 + 5),
+                            fill=(20, 18, 16, 255), outline=outline)
+            d.text((cx_ - tw / 2 - bb[0], cy_ - th / 2 - bb[1]), txt, fill=col, font=font)
+
+        for i, m in enumerate(self.marks):
+            mx, my = P(m["lat"], m["lon"])
+            r = self.px_radius(m)
+            if not (-r < mx < w + r and -r < my < h + r):
+                continue
+            rgb = tuple(int(m["color"][k:k + 2], 16) for k in (1, 3, 5))
+            on = i == self.sel
+            d.ellipse((mx - r, my - r, mx + r, my + r), fill=rgb + (40,), outline=rgb + (255,), width=3 if on else 2)
+            if on and len(m["track"]) > 1:
+                d.line([P(a, b) for a, b in m["track"]], fill=rgb + (255,), width=3)
+            d.ellipse((mx - 4, my - 4, mx + 4, my + 4), fill=(255, 255, 255, 255) if on else rgb + (255,),
+                      outline=rgb + (255,))
+            if on or fz >= 4 or len(self.marks) <= 8:
+                text_box(mx, my - 20, m["label"], (240, 236, 228, 255), rgb + (255,))
+        if self.pin:
+            px, py = P(*self.pin)
+            d.ellipse((px - 10, py - 10, px + 10, py + 10), outline=(255, 255, 255, 255), width=2)
+        if self.radar_on and self.frames:
+            rt = dt.datetime.fromtimestamp(self.frames[self.fidx][0], dt.timezone.utc).strftime("%H:%M UTC")
+            text_box(16 + 150, h - 52, f"Radar {rt} · Weather data by Rain Viewer", (240, 236, 228, 255))
+        txt = "Imagery © Esri, Maxar, Earthstar Geographics"
+        bb = d.textbbox((0, 0), txt, font=font)
+        d.text((w - 8 - (bb[2] - bb[0]) - bb[0], h - 8 - (bb[3] - bb[1]) - bb[1]), txt, fill=(221, 221, 221, 255), font=font)
+        return fr.convert("RGB")
+
+    # ----- radar -----
+    def set_radar(self, on):
+        self.radar_on = on
+        if not on:
+            self.rplay = False
+        self.redraw()
+
+    def _rkey(self, zi, x, y, fi):
+        zr = max(1, min(zi, 3 if self.rplay else 5))
+        sh = zi - zr
+        return (self.frames[fi][1], zr, x >> sh, y >> sh), sh
+
+    def _rget(self, key):
+        im = self.rpil.get(key)
+        if im is None and key not in self.rpend and time.time() - self.rfail.get(key, 0) > 60:
+            self.rpend.add(key)
+            self.rpool.submit(self._rload, key)
+        return im
+
+    def _rload(self, key):
+        path, z, x, y = key
+        fp = os.path.join(CACHE, "radar", f"{path.split('/')[-1]}_{z}_{x}_{y}.png")
+        im, err = None, None
+        try:
+            if os.path.exists(fp):
+                im = Image.open(fp).convert("RGBA")
+                im.load()
+            else:
+                for _ in range(2):
+                    rate_wait()
+                    r = SES.get(f"{self.rhost}{path}/256/{z}/{x}/{y}/2/1_0.png", headers=HDR, timeout=15)
+                    if r.status_code == 429:
+                        time.sleep(8)
+                        continue
+                    if r.status_code == 404:
+                        im = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+                        break
+                    r.raise_for_status()
+                    im = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                    try:
+                        os.makedirs(os.path.dirname(fp), exist_ok=True)
+                        im.save(fp)
+                    except Exception:
+                        pass
+                    break
+                else:
+                    err = "rate limited (429)"
+            if im is not None and not err:
+                im.putalpha(im.getchannel("A").point(lambda v: int(v * 0.8)))
+        except Exception as ex:
+            err = str(ex)[:80]
+        ui(lambda: self._rgot(key, im, err))
+
+    def _rgot(self, key, im, err=None):
+        self.rpend.discard(key)
+        if err:
+            self.rfail[key] = time.time()
+            if not self._rerr:
+                self._rerr = True
+                self.on_error(f"Radar: {err}")
+            return
+        if len(self.rpil) > 400:
+            self.rpil.clear()
+            self.rcrop.clear()
+            self.rtk.clear()
+        self.rpil[key] = im
+        if self.radar_on and not self._rrd:
+            self._rrd = self.after(400, self._rredraw)
+
+    def _rredraw(self):
+        self._rrd = None
+        self.redraw()
+
+    def radar_ready_frame(self, fi):
+        return all(self.rpil.get(self._rkey(zi, x, y, fi)[0]) is not None for zi, x, y in self._rneed)
+
+    def radar_warm(self):
+        for fi in range(len(self.frames)):
+            for zi, x, y in list(self._rneed):
+                self._rget(self._rkey(zi, x, y, fi)[0])
+
+    def _rfall(self, path, z, x, y):
+        for up in range(1, 4):
+            if z - up < 1:
+                break
+            p = self.rpil.get((path, z - up, x >> up, y >> up))
+            if p is not None:
+                sub = 256 >> up
+                ox, oy = (x % (1 << up)) * sub, (y % (1 << up)) * sub
+                return p.convert("RGBa").resize((256, 256), RESAMPLE, box=(ox, oy, ox + sub, oy + sub)).convert("RGBA")
+        kids = [(i, j, self.rpil.get((path, z + 1, 2 * x + i, 2 * y + j))) for i in (0, 1) for j in (0, 1)]
+        if any(k[2] is not None for k in kids):
+            c = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+            for i, j, k in kids:
+                if k is not None:
+                    c.paste(k.resize((128, 128), RESAMPLE), (i * 128, j * 128))
+            return c
+        return None
+
+    def radar_pil(self, zi, x, y):
+        key, sh = self._rkey(zi, x, y, self.fidx)
+        if sh > 7:
+            return None, None
+        if self.rplay:
+            self._rneed.add((zi, x, y))
+        im = self._rget(key)
+        exact = im is not None
+        if not exact:
+            im = self._rfall(*key)
+            if im is None:
+                return None, None
+        k = (key, x, y, exact)
+        p = self.rcrop.get(k)
+        if p is None:
+            if len(self.rcrop) > 300:
+                self.rcrop.clear()
+            if sh:
+                sub = 256 / (1 << sh)
+                ox, oy = (x - (key[2] << sh)) * sub, (y - (key[3] << sh)) * sub
+                p = im.convert("RGBa").resize((256, 256), RESAMPLE, box=(ox, oy, ox + sub, oy + sub)).convert("RGBA")
+            else:
+                p = im
+            self.rcrop[k] = p
+        return p, k
+
+    def radar_tile(self, zi, x, y, ts):
+        p, k = self.radar_pil(zi, x, y)
+        if p is None:
+            return None
+        k = (k, ts)
+        t = self.rtk.get(k)
+        if t is None:
+            if len(self.rtk) > 300:
+                self.rtk.clear()
+            t = self.rtk[k] = ImageTk.PhotoImage(p if ts == 256 else p.resize((ts, ts), Image.Resampling.NEAREST))
+        return t
+
     # ----- drawing -----
     def redraw(self):
         self._rd = None
@@ -1086,6 +1362,7 @@ class TileMap(tk.Canvas):
         if len(self.scaled) > 300: self.scaled.clear()
         if len(self.ovl) > 80: self.ovl.clear()
         self._sel_geom, self.path_px, self.path_cum = None, [], []
+        self._rneed = set()
         fz = self.fz
         zi = max(0, min(19, int(round(fz))))
         n = 2 ** zi
@@ -1102,6 +1379,10 @@ class TileMap(tk.Canvas):
                     img = self.tile_img(zi, tx % n, ty, ts)
                     if img:
                         self.create_image(tx * tsf - x0, ty * tsf - y0, image=img, anchor="nw")
+                    if self.radar_on and self.frames:
+                        rimg = self.radar_tile(zi, tx % n, ty, ts)
+                        if rimg:
+                            self.create_image(tx * tsf - x0, ty * tsf - y0, image=rimg, anchor="nw")
 
         def P(lat, lon):
             px, py = self.world(lat, lon, fz)
@@ -1173,6 +1454,10 @@ class TileMap(tk.Canvas):
                 self.create_text(bx + bar_px / 2, by - 7, text=f"{target_km} km",
                                  fill=TEXT, font=(SANS, 8), anchor="center")
                 break
+        if self.radar_on and self.frames:
+            rt = dt.datetime.fromtimestamp(self.frames[self.fidx][0], dt.timezone.utc).strftime("%H:%M UTC")
+            self.create_text(16, h - 52, anchor="w", fill=TEXT, font=(SANS, 9, "bold"),
+                             text=f"Radar ALPHA, may lag · {rt} ({self.fidx + 1}/{len(self.frames)}) · Weather data by Rain Viewer")
         self.create_text(w - 8, h - 8, anchor="se", fill="#ddd", font=(SANS, 8),
                          text="Imagery © Esri, Maxar, Earthstar Geographics")
 
@@ -1288,7 +1573,7 @@ KIND_COL.setdefault("Alert", "#e5534b")
 
 LOWK = ("Flood", "Fire")
 FF = "Floods & Fires"
-ORDER = ["Tornado", "Hurricane", "Blizzard", "Storm", "Wind", "Alert", "Quake", "Heat", "Cold", FF]
+ORDER = ["Tornado", "Hurricane", "Blizzard", "Storm", "Wind", "Alert", "Quake", "Heat", "Cold", FF, "Volcano", "Drought"]
 KIND_COL["Flood"] = KIND_COL[FF] = "#4c85f0"
 
 
@@ -1432,6 +1717,8 @@ def entry(parent, **kw):
 
 class App(tk.Tk):
     mode, flt = "live", "All"
+    PH = "Filter events by name or place..."
+    _qj = None
     _rj = None
     _draining, _fsid, _last, _wbox = False, None, None, None
     def __init__(self):
@@ -1532,6 +1819,14 @@ class App(tk.Tk):
 
         self.wrap = wrap = tk.Frame(left, bg=BG)
         wrap.pack(fill="both", expand=True, padx=(22, 10), pady=(0, 14))
+        self.q = entry(left)
+        self.q.pack(fill="x", padx=28, pady=(0, 6), ipady=4, before=wrap)
+        self.q.insert(0, self.PH)
+        self.q.configure(fg=MUTED)
+        self.q.bind("<FocusIn>", self.q_in)
+        self.q.bind("<FocusOut>", self.q_out)
+        self.q.bind("<KeyRelease>", lambda e: self.q_changed())
+        self.bind("<Control-k>", lambda e: (self.q.focus_set(), "break")[1])
         self.cv = tk.Canvas(wrap, bg=BG, highlightthickness=0)
         self.cv.pack(fill="both", expand=True)
         self.inner = tk.Frame(self.cv, bg=BG)
@@ -1553,6 +1848,17 @@ class App(tk.Tk):
         c = lambda: (self.map.winfo_width() / 2, self.map.winfo_height() / 2)
         button(zm, "+", lambda: self.map.zoom_at(1, *c()), bold=True).pack()
         button(zm, "−", lambda: self.map.zoom_at(-1, *c()), bold=True).pack(pady=(4, 0))
+
+        self.rb = rb = tk.Frame(self.map, bg=BG, padx=4, pady=4)
+        rb.place(relx=1, rely=0, x=-16, y=16, anchor="ne")
+        self.b_radar = button(rb, "Radar", self.toggle_radar)
+        self.b_radar.pack(side="left")
+        self.b_play = button(rb, "▶", self.play_radar)
+        self.b_play.pack(side="left", padx=(4, 0))
+
+        sb = tk.Frame(self.map, bg=BG, padx=4, pady=4)
+        sb.place(relx=1, rely=1, x=-16, y=-122, anchor="se")
+        button(sb, "PNG", self.screenshot).pack()
 
         lg = tk.Frame(self.map, bg=BG, padx=12, pady=8)
         lg.place(x=16, y=16)
@@ -1578,6 +1884,9 @@ class App(tk.Tk):
         self.b_copy = button(bt, "Copy coords", self.copy_coords)
         self.b_copy.configure(font=(SANS, 10), padx=10, pady=4)
         self.b_copy.pack(side="left", padx=(6, 0))
+        self.b_fav = button(bt, "★ Save", self.add_fav)
+        self.b_fav.configure(font=(SANS, 10), padx=10, pady=4)
+        self.b_fav.pack(side="left", padx=(6, 0))
 
         self.fcp = tk.Frame(self.map, bg=BG, highlightthickness=1, highlightbackground=BORDER)
         self.f_tag = tk.Label(self.fcp, bg=BG, fg=ACCENT, anchor="w", font=(SANS, 9, "bold"))
@@ -1586,10 +1895,13 @@ class App(tk.Tk):
         self.f_body = tk.Label(self.fcp, bg=BG, fg=MUTED, anchor="w", justify="left", font=(SANS, 10))
         for wd, pad in ((self.f_tag, (12, 0)), (self.f_title, (2, 0)), (self.f_body, (8, 10))):
             wd.pack(fill="x", padx=16, pady=pad)
-        b_close = button(self.fcp, "Close", self.drop_pin)
-        b_close.configure(font=(SANS, 10), padx=10, pady=4)
-        b_close.pack(anchor="w", padx=16, pady=(0, 14))
-        self.map.on_empty = self.show_forecast
+        fb = tk.Frame(self.fcp, bg=BG)
+        fb.pack(fill="x", padx=16, pady=(0, 14))
+        for txt, cmd in (("★ Save", self.add_fav), ("Close", self.drop_pin)):
+            b = button(fb, txt, cmd)
+            b.configure(font=(SANS, 10), padx=10, pady=4)
+            b.pack(side="left", padx=(0, 6))
+        self.map.on_empty = lambda la, lo: self.mode == "live" and self.show_forecast(la, lo)
 
         self.build_menubar()
         self.sub("filters")
@@ -1803,6 +2115,7 @@ class App(tk.Tk):
 
         m = mk("File")
         add(m, "Export events as JSON…", self.export_json, "Ctrl+S", "<Control-s>")
+        add(m, "Save map as PNG…", self.screenshot, "Ctrl+P", "<Control-p>")
         add(m, "Copy coordinates", self.copy_coords, "Ctrl+Shift+C", "<Control-C>")
         m.add_separator()
         add(m, "Open map folder", self.open_folder)
@@ -1819,6 +2132,12 @@ class App(tk.Tk):
         for k in CONT:
             cm.add_radiobutton(label="  " + k, variable=self.cont, value=k, command=lambda: self.set_cont())
         m.add_cascade(label="  Continent", menu=cm)
+        um = tk.Menu(m, tearoff=0, bg=SURF, fg=TEXT, activebackground=ACCENT, activeforeground=BG,
+                     activeborderwidth=0, bd=1, font=(SANS, 10), selectcolor=ACCENT)
+        self.units = tk.StringVar(value="metric")
+        for v, lab in (("metric", "Metric (°C, km/h)"), ("imp", "Imperial (°F, mph)")):
+            um.add_radiobutton(label="  " + lab, variable=self.units, value=v, command=self.set_units)
+        m.add_cascade(label="  Units", menu=um)
         m.add_checkbutton(label="  Search the whole year", variable=self.whole, selectcolor=ACCENT,
                           command=lambda: self.schedule(300), accelerator="Ctrl+Y  ")
         self.bind("<Control-y>", lambda e: (self.toggle_year(), "break")[1])
@@ -1836,6 +2155,11 @@ class App(tk.Tk):
         add(m, "Previous month", lambda: self.shift_month(-1), "Alt+←", "<Alt-Left>")
         add(m, "Next month", lambda: self.shift_month(1), "Alt+→", "<Alt-Right>")
         add(m, "Current month", self.this_month, "Alt+Home", "<Alt-Home>")
+
+        m = mk("★ Favorites")
+        self.favm = m
+        m.configure(postcommand=self.fav_menu)
+        self.bind("<Control-d>", lambda e: (self.add_fav(), "break")[1])
 
         m = mk("Help")
         m.add_command(label="Tutorial", command=self.show_tutorial)
@@ -1930,6 +2254,12 @@ class App(tk.Tk):
         for w in self.ctrl.winfo_children():
             w.pack_forget()
         self.fill_legend(m == "archive")
+        if m == "archive":
+            self.drop_pin()
+            self.stop_radar()
+            self.rb.place_forget()
+        else:
+            self.rb.place(relx=1, rely=0, x=-16, y=16, anchor="ne")
         if m == "live":
             self.pk.pack()
             self.schedule(0)
@@ -1951,7 +2281,7 @@ class App(tk.Tk):
         if self.flt != "All" and not any(gkey(e["kind"]) == self.flt for e in base):
             self.flt = "All"
         self._base = base
-        items = [e for e in base if self.vis(e["kind"])]
+        items = [e for e in base if self.vis(e["kind"]) and self.match(e)]
         self.scan_id += 1
         self.show(items, f"RECORDS · {d0}s" if d0 else "ALL-TIME RECORDS", None)
 
@@ -1986,8 +2316,8 @@ class App(tk.Tk):
     def fill_legend(self, arch):
         for w in self.lg.winfo_children():
             w.destroy()
-        pairs = ([(KIND_COL[k], k.upper()) for k in KINDS[1:]] if arch
-                 else [("#e8873a", "WARNING"), ("#e5534b", "EXTREME")])
+        pairs = [(KIND_COL.get(k, ACCENT), k.upper()) for k in KINDS[1:]
+                 if arch or k not in ("Volcano", "Drought")]
         for col, name in pairs:
             tk.Label(self.lg, text="●", bg=BG, fg=col, font=(SANS, 10)).pack(side="left")
             tk.Label(self.lg, text=name, bg=BG, fg=MUTED, font=(SANS, 9, "bold")).pack(side="left", padx=(4, 12))
@@ -2005,6 +2335,158 @@ class App(tk.Tk):
         self.clipboard_append(f"{it['lat']:.5f}, {it['lon']:.5f}")
         self.b_copy.configure(text="Copied ✓")
         self.after(1200, lambda: self.b_copy.configure(text="Copy coords"))
+
+    def toggle_radar(self):
+        m = self.map
+        if m.radar_on:
+            return self.stop_radar()
+        self.b_radar.configure(fg=ACCENT)
+        if not m.frames or time.time() - getattr(self, "_rt", 0) > 600:
+            self.status.configure(text="Loading radar...", fg=ACCENT)
+            def work():
+                try:
+                    host, fr = radar_frames()
+                    ui(lambda: self.radar_ready(host, fr))
+                except Exception as e:
+                    msg = f"Radar error: {e}"
+                    ui(lambda: self.status.configure(text=msg, fg=RED))
+            threading.Thread(target=work, daemon=True).start()
+        m.set_radar(True)
+
+    def stop_radar(self):
+        m = self.map
+        m.rplay = False
+        self.b_play.configure(text="▶")
+        if m.radar_on:
+            self.b_radar.configure(fg=TEXT)
+            m.set_radar(False)
+
+    def radar_ready(self, host, fr):
+        m = self.map
+        if not fr:
+            self.status.configure(text="Radar: no frames available.", fg=RED)
+            return
+        fr = fr[::-1][::2][:6][::-1]
+        m.rhost, m.frames, m.fidx, self._rt = host, fr, len(fr) - 1, time.time()
+        m.rpil.clear(); m.rtk.clear(); m.rcrop.clear(); m.rpend.clear(); m.rfail.clear(); m._rerr = False
+        d = os.path.join(CACHE, "radar")
+        try:
+            for f in os.listdir(d):
+                if time.time() - os.path.getmtime(os.path.join(d, f)) > 14400:
+                    os.remove(os.path.join(d, f))
+        except OSError:
+            pass
+        self.status.configure(text="Radar (alpha, may lag): last hour, 20 min steps.", fg=ACCENT)
+        m.redraw()
+
+    def play_radar(self):
+        m = self.map
+        if m.rplay:
+            return self.stop_radar()
+        if not m.radar_on:
+            self.toggle_radar()
+        m.rplay = True
+        self.b_play.configure(text="⏸")
+        m.redraw()
+
+    def add_fav(self):
+        p, name = self.map.pin, getattr(self, "_fcname", None)
+        if not p and self.cur is not None:
+            it = self.items[self.cur]
+            p, name = (it["lat"], it["lon"]), it["title"]
+        if not p:
+            self.status.configure(text="Click the map or an event first, then save.", fg=ACCENT)
+            return
+        favs = favs_load()
+        if any(abs(f["lat"] - p[0]) < .05 and abs(f["lon"] - p[1]) < .05 for f in favs):
+            return
+        favs.append({"name": name or f"{p[0]:.2f}, {p[1]:.2f}", "lat": p[0], "lon": p[1]})
+        favs_save(favs)
+        self.status.configure(text=f"Saved {favs[-1]['name']}.", fg=ACCENT)
+
+    def go_fav(self, f):
+        if self.mode != "live":
+            self.set_mode("live")
+        self.show_forecast(f["lat"], f["lon"])
+        self.map.fly_to(f["lat"], f["lon"], 7, 1100)
+
+    def del_fav(self, f):
+        favs_save([x for x in favs_load() if x != f])
+
+    def fav_menu(self):
+        m = self.favm
+        m.delete(0, "end")
+        favs = favs_load()
+        m.add_command(label="  Save this spot", accelerator="Ctrl+D  ", command=self.add_fav,
+                      state="normal" if (self.map.pin or self.cur is not None) else "disabled")
+        m.add_separator()
+        if not favs:
+            m.add_command(label="  (click the map or an event, then Save)", state="disabled")
+        for f in favs:
+            m.add_command(label="  " + f["name"], command=lambda f=f: self.go_fav(f))
+        if favs:
+            m.add_separator()
+            rm = tk.Menu(m, tearoff=0, bg=SURF, fg=TEXT, activebackground=ACCENT, activeforeground=BG,
+                         activeborderwidth=0, bd=1, font=(SANS, 10))
+            for f in favs:
+                rm.add_command(label="  " + f["name"], command=lambda f=f: self.del_fav(f))
+            m.add_cascade(label="  Remove", menu=rm)
+
+    def set_units(self):
+        U["imp"] = self.units.get() == "imp"
+        if self.mode == "archive":
+            self.show_archive()
+        elif getattr(self, "_acc", None):
+            self._fsid = None
+            self.feed(list(self._acc), self._label, self.scan_id, True)
+        if self.map.pin:
+            self.show_forecast(*self.map.pin)
+
+    def q_in(self, e=None):
+        if self.q.get() == self.PH:
+            self.q.delete(0, "end")
+        self.q.configure(fg=TEXT)
+
+    def q_out(self, e=None):
+        if not self.q.get().strip():
+            self.q.delete(0, "end")
+            self.q.insert(0, self.PH)
+            self.q.configure(fg=MUTED)
+
+    def match(self, it):
+        q = self.q.get().strip().lower()
+        if not q or q == self.PH.lower():
+            return True
+        hay = " ".join((it["title"], it["kind"], it["desc"], it.get("facts", ""))).lower()
+        return all(w in hay for w in q.split())
+
+    def q_changed(self):
+        if self._qj:
+            self.after_cancel(self._qj)
+        self._qj = self.after(250, self.refilter)
+
+    def refilter(self):
+        self._qj = None
+        if self.mode == "archive":
+            self.show_archive()
+        elif getattr(self, "_acc", None):
+            self._fsid = None
+            self.feed(list(self._acc), self._label, self.scan_id, True)
+
+    def screenshot(self):
+        from tkinter import filedialog
+        d = os.path.expanduser("~/Pictures")
+        f = filedialog.asksaveasfilename(
+            defaultextension=".png", filetypes=[("PNG", "*.png")],
+            initialdir=d if os.path.isdir(d) else os.path.expanduser("~"),
+            initialfile="weather-" + dt.datetime.now().strftime("%Y%m%d-%H%M") + ".png")
+        if not f:
+            return
+        try:
+            self.map.render().save(f)
+            self.status.configure(text=f"Saved {os.path.basename(f)}.", fg=ACCENT)
+        except Exception as e:
+            self.status.configure(text=f"Screenshot error: {e}", fg=RED)
 
     def poll(self):
         try:
@@ -2065,6 +2547,9 @@ class App(tk.Tk):
         pts = []
         if live:
             s, w, n, e = self.cont_box() or self.map.bounds()
+            s, n = max(s, -58), min(n, 70)
+            if s >= n:
+                s, n = -58, 70
             cols, rows = 8, 5
             for r in range(rows):
                 for c in range(cols):
@@ -2073,6 +2558,15 @@ class App(tk.Tk):
                     pts.append((la, (lo + 180) % 360 - 180))
         cn = self.cont.get()
         skey = (y, m, whole, cn)
+        ppts = []
+        if not live and not future:
+            s_, w_, n_, e_ = self.cont_box() or self.map.bounds()
+            s_, n_ = max(s_, -58), min(n_, 70)
+            if s_ >= n_:
+                s_, n_ = -58, 70
+            for r in range(6):
+                for c in range(10):
+                    ppts.append((n_ - (r + 0.5) / 6 * (n_ - s_), ((w_ + (c + 0.5) / 10 * (e_ - w_)) + 180) % 360 - 180))
         box = (self.cont_box() or self.map.bounds()) if live else None
         vo = bool(self._last and self._last[0] == skey and self._last[1] == self.scan_id)
         if vo:
@@ -2088,6 +2582,10 @@ class App(tk.Tk):
             self.after(12000, lambda: setattr(self.map, "hold", False))
         sid = self.scan_id
         self._last = (skey, sid)
+        if whole:
+            ws, we = f"{y}-01-01", f"{y}-12-31"
+        else:
+            ws, we = f"{y}-{m:02d}-01", f"{y}-{m:02d}-31"
         if live:
             self._wbox = box
 
@@ -2099,16 +2597,21 @@ class App(tk.Tk):
                     return
                 with lock:
                     acc.extend(new)
-                    its = [x for x in acc if in_cont(x, cn)]
-                its.sort(key=lambda x: -x["sev"])
-                its = its[:120]
+                    its = [x for x in acc if in_cont(x, cn) and in_win(x, ws, we)]
+                its.sort(key=lambda x: (-x["sev"], -x["radius"]))
+                cnt, keep = {}, []
+                for x in its:
+                    cnt[x["kind"]] = cnt.get(x["kind"], 0) + 1
+                    if cnt[x["kind"]] <= 40:
+                        keep.append(x)
+                its = keep
                 ui(lambda: sid == self.scan_id and self.feed(its, label, sid, final))
 
             if future:
                 return push([], True)
             jobs = []
             cached = self.ev_cache.get(key)
-            dk = f"v5-{y}-{m}-{int(whole)}-{int(live)}"
+            dk = f"v7-{y}-{m}-{int(whole)}-{int(live)}"
             if cached is None:
                 cached = ev_load(dk, 600 if live else 2592000)
             if vo:
@@ -2121,6 +2624,10 @@ class App(tk.Tk):
                 jobs.append(("nws", get_nws))
                 jobs.append(("quakes", get_quakes))
                 jobs.append(("fires", get_fires))
+                jobs.append(("alarm", get_meteoalarm))
+            if not live and not vo:
+                jobs.append(("pastq", lambda: get_quakes_past(y, m, whole)))
+                jobs.append(("pastx", lambda: get_extremes_past(ppts, y, m, whole)))
             if live:
                 jobs.append(("wind", lambda: get_winds(pts, now.date(), now.hour)))
 
@@ -2213,7 +2720,7 @@ class App(tk.Tk):
             self.flt = "All"
         new = []
         for it in its:
-            if not self.vis(it["kind"]):
+            if not (self.vis(it["kind"]) and self.match(it)):
                 continue
             k = (it["title"], round(it["lat"], 2), round(it["lon"], 2))
             if k not in self._seen:
@@ -2328,11 +2835,11 @@ class App(tk.Tk):
         bar.pack(side="left", fill="y")
         body = tk.Frame(card, bg=SURF)
         body.pack(side="left", fill="x", expand=True, padx=14, pady=11)
-        parts = [tk.Label(body, text=f"{it['kind'].upper()} · {tag}", bg=SURF, fg=color,
+        parts = [tk.Label(body, text=f"{it['kind'].upper()} · {uconv(tag)}", bg=SURF, fg=color,
                           anchor="w", font=(SANS, 9, "bold")),
                  tk.Label(body, text=it["title"], bg=SURF, fg=TEXT, anchor="w",
                           font=(SANS, 14, "bold"), wraplength=self.left_w() - 120, justify="left"),
-                 tk.Label(body, text=it["desc"], bg=SURF, fg=MUTED, anchor="w", justify="left",
+                 tk.Label(body, text=uconv(it["desc"]), bg=SURF, fg=MUTED, anchor="w", justify="left",
                           wraplength=self.left_w() - 130, font=(SERIF, 12)),
                  tk.Label(body, text=f"{it['lat']:.2f}, {it['lon']:.2f}", bg=SURF, fg=MUTED,
                           anchor="w", font=(SANS, 9))]
@@ -2370,6 +2877,7 @@ class App(tk.Tk):
         self._fcid = getattr(self, "_fcid", 0) + 1
         fid = self._fcid
         self.map.pin = (lat, lon)
+        self._fcname = None
         self.map.redraw()
         self.f_tag.configure(text=f"FORECAST  ·  {lat:.2f}, {lon:.2f}")
         self.f_title.configure(text="Loading...")
@@ -2394,12 +2902,12 @@ class App(tk.Tk):
                     headers=HDR, timeout=15).json()
                 fx = lambda v, p=0: "-" if v is None else f"{v:.{p}f}"
                 c, d = f["current"], f["daily"]
-                rows = [f"Now  {fx(c['temperature_2m'])}\u00b0C (feels {fx(c['apparent_temperature'])}\u00b0)  \u00b7  {wmo(c['weather_code'])}",
-                        f"Wind {fx(c['wind_speed_10m'])} km/h, gusts {fx(c['wind_gusts_10m'])}  \u00b7  rain {fx(c['precipitation'], 1)} mm", ""]
+                rows = [f"Now  {T(c['temperature_2m'])} (feels {T(c['apparent_temperature'])})  \u00b7  {wmo(c['weather_code'])}",
+                        f"Wind {S(c['wind_speed_10m'])}, gusts {S(c['wind_gusts_10m'])}  \u00b7  rain {fx(c['precipitation'], 1)} mm", ""]
                 for k in range(len(d["time"])):
                     day = dt.date.fromisoformat(d["time"][k]).strftime("%a")
-                    rows.append(f"{day}   {fx(d['temperature_2m_max'][k])}\u00b0 / {fx(d['temperature_2m_min'][k])}\u00b0   "
-                                f"{wmo(d['weather_code'][k])}   {fx(d['precipitation_sum'][k])} mm   gusts {fx(d['wind_gusts_10m_max'][k])}")
+                    rows.append(f"{day}   {T(d['temperature_2m_max'][k])} / {T(d['temperature_2m_min'][k])}   "
+                                f"{wmo(d['weather_code'][k])}   {fx(d['precipitation_sum'][k])} mm   gusts {S(d['wind_gusts_10m_max'][k])}")
                 text = "\n".join(rows)
             except Exception:
                 pass
@@ -2411,6 +2919,7 @@ class App(tk.Tk):
         bits = [x for x in (p.get("city") or p.get("locality"), p.get("principalSubdivision")) if x]
         self.f_title.configure(text=p.get("countryName") or "Open sea / unnamed area")
         near = ("Near " + ", ".join(bits) + "\n\n") if bits else ""
+        self._fcname = ", ".join(bits) or p.get("countryName")
         self.f_body.configure(text=near + (text or "Forecast unavailable. Check your connection."))
         if self.f != 1.0:
             self.scale_fonts(self.fcp)
@@ -2425,14 +2934,14 @@ class App(tk.Tk):
         self.paint(i, SURF2)
         it = self.items[i]
         color, tag = style(it)
-        self.d_tag.configure(text=f"{it['kind'].upper()} · {tag}", fg=color)
+        self.d_tag.configure(text=f"{it['kind'].upper()} · {uconv(tag)}", fg=color)
         self.d_title.configure(text=it["title"])
-        self.d_desc.configure(text=it["desc"])
+        self.d_desc.configure(text=uconv(it["desc"]))
         meta = f"{it['lat']:.2f}, {it['lon']:.2f}  ·  impact radius ~{it['radius']:.0f} km"
         if it["track"] and len(it["track"]) > 1:
             meta += f"\nTrack: {len(it['track'])} points" + (" (approximate)" if it.get("db") else "") + (" · dashed line is the projected path" if it["fc"] else "")
         if it.get("facts"):
-            meta += "\n" + it["facts"]
+            meta += "\n" + uconv(it["facts"])
         self.d_meta.configure(text=meta)
         self.detail.place(relx=0, rely=1, x=16, y=-34, anchor="sw")
         if getattr(self, "subtab", "events") != "events":
