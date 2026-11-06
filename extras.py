@@ -181,7 +181,7 @@ def get_quakes_past(y, m, whole):
         out.append({"lat": lat, "lon": lon, "sev": 3 if mag >= 6.5 else 2,
                     "title": p.get("place") or "Earthquake", "kind": "Quake",
                     "desc": f"M{mag:.1f} earthquake, {day}.", "radius": int(20 + mag * 15),
-                    "track": [], "fc": [], "d0": day, "d1": day})
+                    "track": [], "fc": [], "d0": day, "d1": day, "src": p.get("url")})
     _QC[key] = out
     return list(out)
 
@@ -227,7 +227,7 @@ def get_extremes_past(points, y, m, whole):
 
         def add(sev, title, kind, desc, day):
             out.append({"lat": la, "lon": lo, "sev": sev, "title": title, "kind": kind, "radius": 90,
-                        "desc": desc, "track": [], "fc": [], "d0": day, "d1": day})
+                        "desc": desc + " Modeled value (ERA5 grid sample), not a reported event.", "track": [], "fc": [], "d0": day, "d1": day})
 
         g, gd = peak("wind_gusts_10m_max")
         if g is not None and g >= 120:
@@ -245,4 +245,96 @@ def get_extremes_past(points, y, m, whole):
         if sn is not None and sn >= 30:
             add(3 if sn >= 50 else 2, "Heavy snowfall", "Blizzard", f"{sn:.0f} cm of snow in one day ({sd}).", sd)
     _EX[key] = out
+    return list(out)
+
+
+# ---- past tornadoes (NOAA SPC daily storm reports) ----
+import csv, math
+SPC = "https://www.spc.noaa.gov/climo/reports/{}_rpts_filtered.csv"
+_TC = {}
+
+
+def _spc_day(day, cache_dir):
+    ds = day.strftime("%y%m%d")
+    fp = os.path.join(cache_dir, "spc", ds + ".json")
+    old = (_dt.date.today() - day).days >= 3
+    if old:
+        try:
+            return json.load(open(fp))
+        except Exception:
+            pass
+    r = requests.get(SPC.format(ds), headers=HDR, timeout=20)
+    if r.status_code == 404:
+        return []
+    r.raise_for_status()
+    pts, sec = [], None
+    for row in csv.reader(r.text.splitlines()):
+        if not row:
+            continue
+        if row[0].strip().lower() == "time":
+            sec = row[1].strip().lower() if len(row) > 1 else ""
+            continue
+        if sec != "f_scale" or len(row) < 7:
+            continue
+        try:
+            la, lo = float(row[5]), float(row[6])
+        except ValueError:
+            continue
+        if abs(la) > 90:
+            la /= 100
+        if abs(lo) > 180:
+            lo = -abs(lo) / 100
+        pts.append([la, lo, row[2].strip(), row[4].strip()])
+    if old:
+        try:
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            json.dump(pts, open(fp, "w"))
+        except OSError:
+            pass
+    return pts
+
+
+def get_tornadoes_past(y, m, whole, cache_dir):
+    key = (y, m, whole)
+    if key in _TC:
+        return list(_TC[key])
+    today = _dt.date.today()
+    if whole:
+        a, b = _dt.date(y, 1, 1), _dt.date(y, 12, 31)
+    else:
+        a, b = _dt.date(y, m, 1), _dt.date(y, m, _cal.monthrange(y, m)[1])
+    b = min(b, today - _dt.timedelta(days=1))
+    days = [a + _dt.timedelta(d) for d in range((b - a).days + 1)] if a <= b else []
+
+    def one(d):
+        try:
+            return _spc_day(d, cache_dir)
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        res = list(ex.map(one, days))
+    out = []
+    for d, pts in zip(days, res):
+        clusters = []
+        for la, lo, loc, st in pts or []:
+            for c in clusters:
+                if abs(c["la"] - la) < 1.5 and abs(c["lo"] - lo) < 1.5 / max(0.3, math.cos(math.radians(la))):
+                    c["n"] += 1
+                    c["la"] += (la - c["la"]) / c["n"]
+                    c["lo"] += (lo - c["lo"]) / c["n"]
+                    break
+            else:
+                clusters.append({"la": la, "lo": lo, "n": 1, "loc": loc, "st": st})
+        ds = d.strftime("%y%m%d")
+        for c in clusters:
+            n = c["n"]
+            out.append({"lat": c["la"], "lon": c["lo"], "sev": 3 if n >= 5 else 2,
+                        "title": f"Tornado near {c['loc']}, {c['st']}" if n == 1 else f"{n} tornado reports, {c['st']}",
+                        "kind": "Tornado", "radius": 25 + min(n, 20) * 6,
+                        "desc": f"{n} preliminary tornado report{'s' if n > 1 else ''} on {d.isoformat()}. Source: NOAA Storm Prediction Center.",
+                        "track": [], "fc": [], "d0": d.isoformat(), "d1": d.isoformat(),
+                        "src": f"https://www.spc.noaa.gov/climo/reports/{ds}_rpts.html"})
+    if all(r is not None for r in res):
+        _TC[key] = out
     return list(out)

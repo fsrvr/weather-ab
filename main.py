@@ -18,7 +18,7 @@ SES = requests.Session()
 SES.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=32))
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "map")
 import calendar, re
-from extras import U, T, S, uconv, favs_load, favs_save, get_meteoalarm, radar_frames, rate_wait, get_quakes_past, get_extremes_past
+from extras import U, T, S, uconv, favs_load, favs_save, get_meteoalarm, radar_frames, rate_wait, get_quakes_past, get_extremes_past, get_tornadoes_past
 
 ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/"
 IMAGERY = ESRI + "World_Imagery/MapServer/tile/{z}/{y}/{x}"
@@ -134,16 +134,20 @@ def eo_poly(g):
 
 
 def get_eonet(y, m, live, whole=False):
-    cats = "severeStorms,floods,snow,tempExtremes,wildfires"
+    ws, we = (f"{y}-01-01", f"{y}-12-31") if whole else (f"{y}-{m:02d}-01", f"{y}-{m:02d}-31")
+    cats = "severeStorms,floods,snow,tempExtremes"
+    fire = {"status": "all", "category": "wildfires", "limit": 150}
     if whole:
-        ps = [{"status": "all", "start": f"{y}-01-01", "end": f"{y}-12-31", "category": cats}]
+        ps = [{"status": "all", "start": f"{y}-01-01", "end": f"{y}-12-31", "category": cats},
+              dict(fire, start=f"{y}-01-01", end=f"{y}-12-31")]
     elif live:
         ps = [{"status": "open", "days": 20, "category": "severeStorms"},
               {"status": "all", "days": 45, "category": "floods"},
               {"status": "open", "days": 30, "category": "snow,tempExtremes"}]
     else:
         last = calendar.monthrange(y, m)[1]
-        ps = [{"status": "all", "start": f"{y}-{m:02d}-01", "end": f"{y}-{m:02d}-{last}", "category": cats}]
+        ps = [{"status": "all", "start": f"{y}-{m:02d}-01", "end": f"{y}-{m:02d}-{last}", "category": cats},
+              dict(fire, start=f"{y}-{m:02d}-01", end=f"{y}-{m:02d}-{last}")]
     evs, err = [], None
     for p in ps:
         for i in range(3):
@@ -167,6 +171,9 @@ def get_eonet(y, m, live, whole=False):
         if not pts:
             continue
         pts.sort(key=lambda g: g.get("date", ""))
+        pts = [q for q in pts if ws <= q.get("date", "")[:10] <= we]
+        if not pts:
+            continue
         g = pts[-1]
         lon, lat = g["coordinates"][:2]
         cid = ev["categories"][0]["id"]
@@ -182,14 +189,14 @@ def get_eonet(y, m, live, whole=False):
         elif flood:
             desc = f"Flooding reported, last update {day}. Rivers or coasts are overflowing; follow local authorities."
         elif kmh:
-            desc = f"{cat(kmh)} with sustained winds near {kmh:.0f} km/h. Last fix {day}; dashed line is the projected path."
+            desc = f"{cat(kmh)} with sustained winds near {kmh:.0f} km/h. Last fix {day}{'; dashed line is the projected path' if live else ''}."
         else:
-            desc = f"Active storm system, last fix {day}. Dashed line is the projected path."
+            desc = f"Active storm system, last fix {day}.{' Dashed line is the projected path.' if live else ''}"
         track = [(q["coordinates"][1], q["coordinates"][0]) for q in pts]
         out.append({"lat": lat, "lon": lon, "sev": 3 if cid == "severeStorms" else 2, "title": ev["title"],
-                    "desc": desc, "kind": ekind(cid, ev["title"]), "d0": pts[0].get("date", "")[:10] or None, "d1": day or None,
+                    "desc": desc, "kind": ekind(cid, ev["title"]), "d0": pts[0].get("date", "")[:10] or None, "d1": day or None, "src": (ev.get("sources") or [{}])[0].get("url") or ev.get("link"),
                     "radius": max(15, min(300, g.get("_rad", 70))) if cid != "severeStorms" else 120 + (mag or 60) * 2,
-                    "track": track, "fc": [] if cid != "severeStorms" else project(track)})
+                    "track": track, "fc": [] if cid != "severeStorms" or not live else project(track)})
     return out
 
 
@@ -301,7 +308,7 @@ def get_quakes():
                     "sev": 3 if mag >= 6.5 else 2,
                     "title": p.get("place", "Earthquake"),
                     "kind": "Quake",
-                    "desc": f"M{mag:.1f} earthquake, {qd(p)}.", "d0": qd(p), "d1": qd(p),
+                    "desc": f"M{mag:.1f} earthquake, {qd(p)}.", "d0": qd(p), "d1": qd(p), "src": p.get("url"),
                     "radius": int(20 + mag * 15),
                     "track": [], "fc": []})
     return out
@@ -318,7 +325,7 @@ def get_fires():
             continue
         lon, lat = pts[-1]["coordinates"][:2]
         out.append({"lat": lat, "lon": lon, "sev": 2, "title": ev["title"], "kind": "Fire",
-                    "desc": "Active wildfire.", "radius": 40, "track": [], "fc": [],
+                    "desc": "Active wildfire.", "radius": 40, "track": [], "fc": [], "src": (ev.get("sources") or [{}])[0].get("url") or ev.get("link"),
                     "d0": pts[-1].get("date", "")[:10] or None, "d1": pts[-1].get("date", "")[:10] or None})
     return out
 
@@ -1046,7 +1053,7 @@ class TileMap(tk.Canvas):
             self.pil.clear(); self.tkc.clear()
         self.pil[key] = im
         if not self._rd:
-            self._rd = self.after(30, self.redraw)
+            self._rd = self.after(100, self.redraw)
 
     def tile_pil(self, zi, x, y):
         key = (zi, x, y)
@@ -1134,7 +1141,7 @@ class TileMap(tk.Canvas):
         dr = ImageDraw.Draw(im)
         rgb = tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
         a_edge, a_in = (44, 4) if sel else (92, 20)
-        steps = max(4, min(28, r // 2))
+        steps = max(4, min(14, r // 4))
         for k in range(steps):
             f = k / steps
             rr = r * (1 - f)
@@ -1360,7 +1367,7 @@ class TileMap(tk.Canvas):
         if w < 2: return
         self.delete("all")
         if len(self.scaled) > 300: self.scaled.clear()
-        if len(self.ovl) > 80: self.ovl.clear()
+        if len(self.ovl) > 500: self.ovl.clear()
         self._sel_geom, self.path_px, self.path_cum = None, [], []
         self._rneed = set()
         fz = self.fz
@@ -1391,17 +1398,22 @@ class TileMap(tk.Canvas):
         order = [i for i in range(len(self.marks)) if i != self.sel]
         if self.sel is not None and self.sel < len(self.marks):
             order.append(self.sel)
+        vis = []
         for i in order:
             m = self.marks[i]
             mx, my = P(m["lat"], m["lon"])
             r = self.px_radius(m)
-            if not (-r < mx < w + r and -r < my < h + r):
-                continue
+            if -r < mx < w + r and -r < my < h + r:
+                vis.append((i, m, mx, my, r))
+        nvis = len(vis)
+        for i, m, mx, my, r in vis:
             c, on = m["color"], i == self.sel
             ri = int(r)
-            if not self.anim and 2 * ri <= 900:
-                self.create_image(mx, my, image=self.ovl_img(ri, c, on))
-            self.create_oval(mx - r, my - r, mx + r, my + r, outline=c, width=3 if on else 2)
+            if not self.anim and 2 * ri <= 640:
+                q = max(4, ri // 12)
+                self.create_image(mx, my, image=self.ovl_img(max(13, ri // q * q), c, on))
+            if r <= 3000:
+                self.create_oval(mx - r, my - r, mx + r, my + r, outline=c, width=3 if on else 2)
             if on:
                 pts = [P(a, b) for a, b in m["track"]]
                 fc = [P(a, b) for a, b in m["fc"]]
@@ -1435,7 +1447,7 @@ class TileMap(tk.Canvas):
             d = 5 if on else 3.5
             self.create_oval(mx - d, my - d, mx + d, my + d, fill="white" if on else c,
                              outline=c if on else "white", width=2 if on else 1)
-            if on or fz >= 4 or len(self.marks) <= 8:
+            if on or (nvis <= 30 and not self.anim and (fz >= 4 or len(self.marks) <= 8)):
                 t = self.create_text(mx, my - 20, text=m["label"], fill=TEXT, font=(SANS, 10, "bold"))
                 bb = self.bbox(t)
                 rc = self.create_rectangle(bb[0] - 9, bb[1] - 4, bb[2] + 9, bb[3] + 4,
@@ -1877,7 +1889,14 @@ class App(tk.Tk):
                         (self.d_meta, (8, 8))):
             wd.pack(fill="x", padx=16, pady=pad)
         bt = tk.Frame(self.detail, bg=BG)
-        bt.pack(fill="x", padx=16, pady=(0, 14))
+        bt.pack(fill="x", padx=16, pady=(0, 6))
+        bt2 = tk.Frame(self.detail, bg=BG)
+        bt2.pack(fill="x", padx=16, pady=(0, 14))
+        self.b_src = button(bt2, "Source ↗", self.open_src)
+        self.b_src.configure(font=(SANS, 10), padx=10, pady=4)
+        self.b_share = button(bt2, "Share", self.share_event)
+        self.b_share.configure(font=(SANS, 10), padx=10, pady=4)
+        self.b_share.pack(side="left")
         self.b_wiki = button(bt, "Learn more ↗", self.open_wiki)
         self.b_wiki.configure(font=(SANS, 10), padx=10, pady=4)
         self.b_wiki.pack(side="left")
@@ -2138,6 +2157,9 @@ class App(tk.Tk):
         for v, lab in (("metric", "Metric (°C, km/h)"), ("imp", "Imperial (°F, mph)")):
             um.add_radiobutton(label="  " + lab, variable=self.units, value=v, command=self.set_units)
         m.add_cascade(label="  Units", menu=um)
+        self.model_ex = tk.BooleanVar(value=False)
+        m.add_checkbutton(label="  Modeled extremes in past (grid)", variable=self.model_ex,
+                          selectcolor=ACCENT, command=self.rescan)
         m.add_checkbutton(label="  Search the whole year", variable=self.whole, selectcolor=ACCENT,
                           command=lambda: self.schedule(300), accelerator="Ctrl+Y  ")
         self.bind("<Control-y>", lambda e: (self.toggle_year(), "break")[1])
@@ -2488,6 +2510,28 @@ class App(tk.Tk):
         except Exception as e:
             self.status.configure(text=f"Screenshot error: {e}", fg=RED)
 
+    def open_src(self):
+        if self.cur is not None and self.items[self.cur].get("src"):
+            webbrowser.open(self.items[self.cur]["src"])
+
+    def share_event(self):
+        if self.cur is None:
+            return
+        it = self.items[self.cur]
+        parts = [f"{it['kind'].upper()}: {it['title']}", uconv(it["desc"]), f"{it['lat']:.2f}, {it['lon']:.2f}"]
+        if it.get("facts"):
+            parts.append(uconv(it["facts"]))
+        if it.get("src"):
+            parts.append(it["src"])
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(parts))
+        self.b_share.configure(text="Copied ✓")
+        self.after(1200, lambda: self.b_share.configure(text="Share"))
+
+    def rescan(self):
+        self._last = None
+        self.schedule(0)
+
     def poll(self):
         try:
             while True:
@@ -2590,28 +2634,37 @@ class App(tk.Tk):
             self._wbox = box
 
         def work():
-            acc, lock, key = [], threading.Lock(), (y, m, whole)
+            acc, lock, key = (list(getattr(self, "_acc", None) or []) if vo else []), threading.Lock(), (y, m, whole)
+            fails = []
+            last = [0.0]
 
-            def push(new, final=False):
-                if not new and not final:
+            def push(new, final=False, flush=False):
+                if not new and not final and not flush:
                     return
                 with lock:
                     acc.extend(new)
                     its = [x for x in acc if in_cont(x, cn) and in_win(x, ws, we)]
+                if not (final or flush) and time.time() - last[0] < 1.2:
+                    return
+                last[0] = time.time()
                 its.sort(key=lambda x: (-x["sev"], -x["radius"]))
-                cnt, keep = {}, []
+                cnt, keep, seen = {}, [], set()
                 for x in its:
+                    ak = (x["title"], round(x["lat"], 2), round(x["lon"], 2))
+                    if ak in seen:
+                        continue
+                    seen.add(ak)
                     cnt[x["kind"]] = cnt.get(x["kind"], 0) + 1
-                    if cnt[x["kind"]] <= 40:
+                    if cnt[x["kind"]] <= 30:
                         keep.append(x)
                 its = keep
-                ui(lambda: sid == self.scan_id and self.feed(its, label, sid, final))
+                ui(lambda: sid == self.scan_id and self.feed(its, label, sid, final, not vo))
 
             if future:
                 return push([], True)
             jobs = []
             cached = self.ev_cache.get(key)
-            dk = f"v7-{y}-{m}-{int(whole)}-{int(live)}"
+            dk = f"v10-{y}-{m}-{int(whole)}-{int(live)}"
             if cached is None:
                 cached = ev_load(dk, 600 if live else 2592000)
             if vo:
@@ -2627,7 +2680,9 @@ class App(tk.Tk):
                 jobs.append(("alarm", get_meteoalarm))
             if not live and not vo:
                 jobs.append(("pastq", lambda: get_quakes_past(y, m, whole)))
-                jobs.append(("pastx", lambda: get_extremes_past(ppts, y, m, whole)))
+                if self.model_ex.get():
+                    jobs.append(("pastx", lambda: get_extremes_past(ppts, y, m, whole)))
+                jobs.append(("pastt", lambda: get_tornadoes_past(y, m, whole, CACHE)))
             if live:
                 jobs.append(("wind", lambda: get_winds(pts, now.date(), now.hour)))
 
@@ -2636,9 +2691,10 @@ class App(tk.Tk):
                     r = fn()
                 except Exception:
                     r = []
-                if name == "eonet":
+                    fails.append(name)
+                if name == "eonet" and r:
                     self.ev_cache = {key: r}
-                    if r: ev_save(dk, r)
+                    ev_save(dk, r)
                 push(r)
 
             ths = [threading.Thread(target=run, args=j, daemon=True) for j in jobs]
@@ -2646,8 +2702,10 @@ class App(tk.Tk):
                 t.start()
             for t in ths:
                 t.join()
-            if not acc:
-                push([], True)
+            push([], True, True)
+            if fails:
+                ui(lambda: sid == self.scan_id and self.status.configure(
+                    text=self.status.cget("text") + "  ·  failed: " + ", ".join(fails), fg=RED))
             self.map.hold = False
             ui(lambda: self.eta_done(sid))
         threading.Thread(target=work, daemon=True).start()
@@ -2704,7 +2762,11 @@ class App(tk.Tk):
         self.count_status(date)
         self.cv.yview_moveto(0)
 
-    def feed(self, its, label, sid, final=False):
+    def feed(self, its, label, sid, final=False, rebuild=True):
+        if final and rebuild and self._fsid == sid:
+            kk = lambda it: (it["title"], round(it["lat"], 2), round(it["lon"], 2))
+            if {kk(it) for it in its if self.vis(it["kind"]) and self.match(it)} != {kk(it) for it in self.items}:
+                self._fsid = None
         if self._fsid != sid:
             self._fsid, self._draining = sid, False
             self._seen, self._pend, self._label = set(), [], label
@@ -2735,6 +2797,8 @@ class App(tk.Tk):
             stats_bar(self.statsbar, self._acc, self.pick_kind, self.flt)
             return
         self.count_status(label)
+        if not final:
+            self.status.configure(text=self.status.cget("text") + "  ·  loading more...")
 
     def _drain(self, sid):
         if sid != self._fsid:
@@ -2943,6 +3007,10 @@ class App(tk.Tk):
         if it.get("facts"):
             meta += "\n" + uconv(it["facts"])
         self.d_meta.configure(text=meta)
+        if it.get("src"):
+            self.b_src.pack(side="left", padx=(0, 6), before=self.b_share)
+        else:
+            self.b_src.pack_forget()
         self.detail.place(relx=0, rely=1, x=16, y=-34, anchor="sw")
         if getattr(self, "subtab", "events") != "events":
             self.sub("events")
