@@ -71,6 +71,8 @@ On Linux/macOS you can also run `./run.sh` (after `chmod +x run.sh`).
 - **Filter box**: filter the event list by name or place (Ctrl+K).
 - **Units**: View > Units switches °C/km/h and °F/mph.
 - **PNG**: save the current map view as an image (Ctrl+P).
+- **Past events**: months and years show NASA storms/floods/fires, USGS quakes and NOAA SPC tornado reports; modeled extremes are optional (View menu).
+- **Details panel**: Source link and Share (copies a short summary).
 - **Tutorial**: shown on first launch, reopen with F1 or Help > Tutorial.
 - **Shortcuts**: Ctrl+F search a city, Ctrl+Q quit, Esc deselect.
 
@@ -89,6 +91,7 @@ On Linux/macOS you can also run `./run.sh` (after `chmod +x run.sh`).
 - US National Weather Service: tornado and extreme wind alerts (live)
 - Open-Meteo: wind gusts, rainfall and past extremes (archive)
 - USGS: earthquakes
+- NOAA SPC: past US tornado reports
 - RainViewer: radar overlay
 - MeteoAlarm: European alerts
 - Esri World Imagery: satellite map
