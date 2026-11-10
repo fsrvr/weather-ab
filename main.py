@@ -684,7 +684,7 @@ def style(it):
 # ---------------- map ----------------
 class TileMap(tk.Canvas):
     MINZ, MAXZ = 2, 18
-    pin, SNAP, on_empty = None, 36, None
+    pin, SNAP, on_empty, on_move = None, 36, None, None
 
     def __init__(self, master, on_view, on_pick, on_error):
         super().__init__(master, bg=BG, highlightthickness=0, cursor="fleur")
@@ -905,6 +905,9 @@ class TileMap(tk.Canvas):
         w, h = self.winfo_width(), self.winfo_height()
         cx, cy = self.world(self.lat, self.lon, self.fz)
         x0, y0 = cx - w / 2, cy - h / 2
+        if self.on_move:
+            la, lo = self.unworld(x0 + e.x, y0 + e.y, self.fz)
+            self.on_move(la, (lo + 180) % 360 - 180)
         t = time.time()
         if t - getattr(self, "_hw", 0) > 0.25 and not self.anim:
             self._hw = t
@@ -1716,9 +1719,12 @@ def wmo(c):
 
 # ---------------- app ----------------
 def button(parent, text, cmd, bg=SURF2, fg=TEXT, bold=False, **kw):
-    return tk.Button(parent, text=text, command=cmd, bg=bg, fg=fg, activebackground=BORDER,
+    b = tk.Button(parent, text=text, command=cmd, bg=bg, fg=fg, activebackground=BORDER,
                      activeforeground=TEXT, relief="flat", bd=0, padx=12, pady=6, cursor="hand2",
                      font=(SANS, 12, "bold" if bold else "normal"), **kw)
+    b.bind("<Enter>", lambda e: b["state"] != "disabled" and b.configure(bg=blend(bg, "#ffffff", .1)))
+    b.bind("<Leave>", lambda e: b.configure(bg=bg))
+    return b
 
 
 def entry(parent, **kw):
@@ -1734,7 +1740,7 @@ class App(tk.Tk):
     _rj = None
     _draining, _fsid, _last, _wbox = False, None, None, None
     def __init__(self):
-        super().__init__()
+        super().__init__(className="weather-ab")
         for w in ("Button", "Menubutton", "Checkbutton"):
             self.option_add(f"*{w}.highlightThickness", 0)
         self.title("Extreme Weather Tracker")
@@ -1764,10 +1770,13 @@ class App(tk.Tk):
 
         head = tk.Frame(left, bg=BG)
         head.pack(fill="x", padx=28, pady=(16, 0))
-        tk.Label(head, text="●", bg=BG, fg=RED, font=(SANS, 10)).pack(side="left")
-        tk.Label(head, text="LIVE", bg=BG, fg=MUTED, font=(SANS, 9, "bold")).pack(side="left", padx=(5, 0))
-        tk.Label(left, text="Extreme weather, right now.", bg=BG, fg=TEXT, justify="left",
-                 anchor="w", font=(SANS, 19, "bold")).pack(fill="x", padx=28, pady=(2, 2))
+        self.h_dot = tk.Label(head, text="●", bg=BG, fg=RED, font=(SANS, 10))
+        self.h_dot.pack(side="left")
+        self.h_lbl = tk.Label(head, text="LIVE", bg=BG, fg=MUTED, font=(SANS, 9, "bold"))
+        self.h_lbl.pack(side="left", padx=(5, 0))
+        self.h_title = tk.Label(left, text="Extreme weather, right now.", bg=BG, fg=TEXT, justify="left",
+                 anchor="w", font=(SANS, 19, "bold"))
+        self.h_title.pack(fill="x", padx=28, pady=(2, 2))
         tk.Label(left, text="Hurricanes, floods, tornadoes and 100+ km/h winds.", bg=BG, fg=MUTED,
                  justify="left", anchor="w", wraplength=360, font=(SERIF, 11)).pack(fill="x", padx=28)
 
@@ -1854,6 +1863,9 @@ class App(tk.Tk):
         self.map = TileMap(self, lambda: self.schedule(800), self.pick_card,
                            lambda m: self.status.configure(text=m, fg=RED))
         self.map.pack(side="right", fill="both", expand=True)
+        self.coord = tk.Label(self.map, bg=BG, fg=MUTED, font=(SANS, 8), padx=8, pady=2)
+        self.coord.place(relx=0.5, rely=1, y=-8, anchor="s")
+        self.map.on_move = lambda la, lo: self.coord.configure(text=f"{la:.3f}, {lo:.3f}")
 
         zm = tk.Frame(self.map, bg=BG, padx=4, pady=4)
         zm.place(relx=1, rely=1, x=-16, y=-34, anchor="se")
@@ -1897,6 +1909,9 @@ class App(tk.Tk):
         self.b_share = button(bt2, "Share", self.share_event)
         self.b_share.configure(font=(SANS, 10), padx=10, pady=4)
         self.b_share.pack(side="left")
+        self.b_close = button(bt2, "Close", lambda: (self.map.select(None), self.pick_card(None)))
+        self.b_close.configure(font=(SANS, 10), padx=10, pady=4)
+        self.b_close.pack(side="left", padx=(6, 0))
         self.b_wiki = button(bt, "Learn more ↗", self.open_wiki)
         self.b_wiki.configure(font=(SANS, 10), padx=10, pady=4)
         self.b_wiki.pack(side="left")
@@ -1928,6 +1943,7 @@ class App(tk.Tk):
         self.after(40, self.poll)
         self.after(900, lambda: self.schedule(0))
         self.after(1500, self.first_run)
+        self.blink()
 
     @property
     def hr(self):
@@ -2195,6 +2211,12 @@ class App(tk.Tk):
             self.after(20000, tick)
         tick()
 
+    def blink(self):
+        c = RED if self.mode == "live" else ACCENT
+        self._bl = not getattr(self, "_bl", False)
+        self.h_dot.configure(fg=c if self._bl else blend(BG, c, .35))
+        self.after(900, self.blink)
+
     def fit_left(self):
         w, h = self.lcv.winfo_width(), self.lcv.winfo_height()
         H = max(h, 1)
@@ -2272,6 +2294,8 @@ class App(tk.Tk):
         if m == self.mode:
             return
         self.mode = m
+        self.h_lbl.configure(text="LIVE" if m == "live" else "ARCHIVE")
+        self.h_title.configure(text="Extreme weather, right now." if m == "live" else "Weather at its worst.")
         self.paint_tabs()
         for w in self.ctrl.winfo_children():
             w.pack_forget()
@@ -2539,20 +2563,6 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(40, self.poll)
-
-    def shift(self, n):
-        try:
-            d = dt.date.fromisoformat(self.date.get().strip()) + dt.timedelta(days=n)
-        except ValueError:
-            d = dt.date.today()
-        self.date.delete(0, "end")
-        self.date.insert(0, d.isoformat())
-        self.schedule(500)
-
-    def step_hour(self, n, scan=True):
-        self.hr = (self.hr + n) % 24
-        self.hlbl.configure(text=f"{self.hr:02d}:00 UTC")
-        if scan: self.schedule(500)
 
     def schedule(self, ms):
         if self.mode != "live":
