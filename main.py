@@ -14,8 +14,11 @@ NWS = "https://api.weather.gov/alerts/active"
 NWS_EVENTS = "Tornado Warning,Extreme Wind Warning,Flash Flood Emergency,Hurricane Warning,Storm Surge Warning,Blizzard Warning,Tornado Watch,High Wind Warning,Ice Storm Warning,Extreme Cold Warning,Extreme Heat Warning,Excessive Heat Warning"
 HDR = {"User-Agent": "WeatherAbnormalityTracker/4.0 (github project)"}
 RESAMPLE = Image.Resampling.BILINEAR
+QF = os.path.expanduser("~/.config/weather-ab-quality")
+try: LQ = {"on": open(QF).read().strip() != "high"}
+except OSError: LQ = {"on": True}
 SES = requests.Session()
-SES.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=32))
+SES.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=16))
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "map")
 import calendar, re
 from extras import U, T, S, uconv, favs_load, favs_save, get_meteoalarm, radar_frames, rate_wait, get_quakes_past, get_extremes_past, get_tornadoes_past
@@ -682,8 +685,14 @@ def style(it):
 
 
 # ---------------- map ----------------
+def blank(im):
+    from PIL import ImageStat
+    st = ImageStat.Stat(im.convert("RGB"))
+    return max(st.mean) - min(st.mean) < 14 and sum(st.stddev) / 3 < 45
+
+
 class TileMap(tk.Canvas):
-    MINZ, MAXZ = 2, 18
+    MINZ, MAXZ, NATIVE = 2, 18, 16
     pin, SNAP, on_empty, on_move = None, 36, None, None
 
     def __init__(self, master, on_view, on_pick, on_error):
@@ -693,13 +702,13 @@ class TileMap(tk.Canvas):
         self.pil, self.tkc, self.scaled, self.ovl, self.pending = {}, {}, {}, {}, set()
         self.marks, self.sel, self.anim = [], None, None
         self.phase, self._sel_geom, self.path_px, self.path_cum = 0, None, [], []
-        self.pool = ThreadPoolExecutor(max_workers=16)
+        self.pool = ThreadPoolExecutor(max_workers=6)
         self.ppool = ThreadPoolExecutor(max_workers=4)
-        self.lpool = ThreadPoolExecutor(max_workers=16)
+        self.lpool = ThreadPoolExecutor(max_workers=6)
         self.vel, self.bgq = (0.0, 0.0), set()
-        self.fg, self.bg, self.loading = [], [], set()
+        self.fg, self.bg, self.loading, self.nodata = [], [], set(), set()
         self.qcv = threading.Condition()
-        for _ in range(24):
+        for _ in range(12):
             threading.Thread(target=self._worker, daemon=True).start()
         self.after(300, self.preload_world)
         self.radar_on, self.frames, self.fidx, self.rplay = False, [], 0, False
@@ -750,14 +759,14 @@ class TileMap(tk.Canvas):
         cx, cy = self.world(self.lat, self.lon, self.fz)
         plat, plon = self.unworld(cx - w / 2 + ex, cy - h / 2 + ey, self.fz)
         self.start_anim({"k": "anchor", "z0": self.fz, "z1": nz, "plat": plat,
-                         "plon": plon, "ex": ex, "ey": ey}, 320)
+                         "plon": plon, "ex": ex, "ey": ey}, 140 if LQ["on"] else 320)
 
     def fly_to(self, lat, lon, zoom, ms=1100, notify=False):
         zoom = max(self.MINZ, min(self.MAXZ, zoom))
         self.tz = zoom
         a, b = self.world(self.lat, self.lon, 0), self.world(lat, lon, 0)
         hop = min(2.5, math.hypot(b[0] - a[0], b[1] - a[1]) / 256 * 6)
-        self.start_anim({"k": "fly", "z0": self.fz, "z1": zoom, "a": a, "b": b, "hop": hop}, ms, notify)
+        self.start_anim({"k": "fly", "z0": self.fz, "z1": zoom, "a": a, "b": b, "hop": hop}, ms // 3 if LQ["on"] else ms, notify)
 
     def _step(self):
         a = self.anim
@@ -804,7 +813,7 @@ class TileMap(tk.Canvas):
                             break
                     self.redraw()
         finally:
-            self.after(8 if self.anim else 33, self._tick)
+            self.after((16 if LQ["on"] else 8) if self.anim else (70 if LQ["on"] else 33), self._tick)
 
     def _pulse(self):
         g = self._sel_geom
@@ -865,7 +874,10 @@ class TileMap(tk.Canvas):
         self.lat, self.lon = self.unworld(cx - dx, cy - dy, self.fz)
         self.lat = max(-85, min(85, self.lat))
         self.lon = (self.lon + 180) % 360 - 180
-        self.redraw()
+        t0 = time.time()
+        if t0 - getattr(self, "_dr", 0) > (0.06 if LQ["on"] else 0):
+            self._dr = t0
+            self.redraw()
         self.vel = (self.vel[0] * 0.7 - dx * 0.3, self.vel[1] * 0.7 - dy * 0.3)
         t = time.time()
         if t - getattr(self, "_pf", 0) > 0.15:
@@ -888,6 +900,7 @@ class TileMap(tk.Canvas):
 
     def _release(self, e):
         if self._moved >= 5:
+            self.redraw()
             return self.on_view()
         best = self.hit(e.x, e.y)
         self.select(best)
@@ -912,12 +925,17 @@ class TileMap(tk.Canvas):
         if t - getattr(self, "_hw", 0) > 0.25 and not self.anim:
             self._hw = t
             self.warm(e.x, e.y, int(round(self.fz)))
+        if t - getattr(self, "_hh", 0) < (0.12 if LQ["on"] else 0.06):
+            return
+        self._hh = t
         c = "hand2" if self.hit(e.x, e.y) is not None else "fleur"
         if c != self._cur:
             self._cur = c
             self.configure(cursor=c)
 
     def fetch(self, key, bg=False):
+        if key in self.nodata:
+            return
         with self.qcv:
             if key in self.pending:
                 if not bg and key in self.bgq:
@@ -971,11 +989,12 @@ class TileMap(tk.Canvas):
                 self.loading.discard(key)
 
     def warm(self, ex, ey, z):
+        z = min(z, self.NATIVE)
         w, h = self.winfo_width(), self.winfo_height()
         cx, cy = self.world(self.lat, self.lon, self.fz)
         plat, plon = self.unworld(cx - w / 2 + ex, cy - h / 2 + ey, self.fz)
-        for zz, bg, r in ((z, False, None), (z + 1, True, 450), (z + 2, True, 300), (z - 1, True, None)):
-            if zz < self.MINZ or zz > self.MAXZ:
+        for zz, bg, r in (((z, False, None),) if LQ["on"] else ((z, False, None), (z + 1, True, 450), (z + 2, True, 300), (z - 1, True, None))):
+            if zz < self.MINZ or zz > self.NATIVE:
                 continue
             n = 2 ** zz
             px, py = self.world(plat, plon, zz)
@@ -999,7 +1018,7 @@ class TileMap(tk.Canvas):
     def prefetch(self, dx, dy, z=None):
         if len(self.pending) > 60: return
         w, h = self.winfo_width(), self.winfo_height()
-        zi = max(self.MINZ, min(self.MAXZ, z if z is not None else int(round(self.fz))))
+        zi = max(self.MINZ, min(self.NATIVE, z if z is not None else int(round(self.fz))))
         n = 2 ** zi
         cx, cy = self.world(self.lat, self.lon, zi)
         cx += dx * w * 0.9
@@ -1017,6 +1036,9 @@ class TileMap(tk.Canvas):
             if os.path.exists(fp):
                 im = Image.open(fp).convert("RGBA")
                 im.load()
+                if z >= 6 and blank(im):
+                    os.remove(fp)
+                    return ui(lambda: (self.pending.discard(key), self.nodata.add(key)))
                 return ui(lambda: self._got(key, im))
         except Exception:
             pass
@@ -1025,6 +1047,9 @@ class TileMap(tk.Canvas):
             r = SES.get(IMAGERY.format(z=z, x=x, y=y), headers=HDR, timeout=15)
             r.raise_for_status()
             im = Image.open(io.BytesIO(r.content)).convert("RGBA")
+            if z >= 6:
+                if blank(im):
+                    return ui(lambda: (self.pending.discard(key), self.nodata.add(key)))
             try:
                 r2 = lf.result()
                 r2.raise_for_status()
@@ -1052,11 +1077,11 @@ class TileMap(tk.Canvas):
 
     def _got(self, key, im):
         self.pending.discard(key)
-        if len(self.pil) > 700:
+        if len(self.pil) > (350 if LQ["on"] else 700):
             self.pil.clear(); self.tkc.clear()
         self.pil[key] = im
         if not self._rd:
-            self._rd = self.after(100, self.redraw)
+            self._rd = self.after(250 if LQ["on"] else 100, self.redraw)
 
     def tile_pil(self, zi, x, y):
         key = (zi, x, y)
@@ -1106,7 +1131,10 @@ class TileMap(tk.Canvas):
         return t
 
     def fast_frame(self, zi, n, tsf, x0, y0, w, h):
-        fr = Image.new("RGB", (w, h), (20, 18, 16))
+        k = 3 if LQ["on"] else 1
+        W, H = max(1, w // k), max(1, h // k)
+        fr = Image.new("RGB", (W, H), (20, 18, 16))
+        t, X0, Y0 = tsf / k, x0 / k, y0 / k
         for tx in range(int(x0 // tsf), int((x0 + w) // tsf) + 1):
             for ty in range(int(y0 // tsf), int((y0 + h) // tsf) + 1):
                 if ty < 0 or ty >= n:
@@ -1114,8 +1142,8 @@ class TileMap(tk.Canvas):
                 im = self.tile_pil(zi, tx % n, ty)
                 if im is None:
                     continue
-                px, py = int(round(tx * tsf - x0)), int(round(ty * tsf - y0))
-                nx, ny = int(round((tx + 1) * tsf - x0)), int(round((ty + 1) * tsf - y0))
+                px, py = int(round(tx * t - X0)), int(round(ty * t - Y0))
+                nx, ny = int(round((tx + 1) * t - X0)), int(round((ty + 1) * t - Y0))
                 sz = (max(1, nx - px), max(1, ny - py))
                 if im.size != sz:
                     im = im.resize(sz, Image.Resampling.NEAREST)
@@ -1126,6 +1154,8 @@ class TileMap(tk.Canvas):
                         if rp.size != sz:
                             rp = rp.resize(sz, Image.Resampling.NEAREST)
                         fr.paste(rp, (px, py), rp)
+        if k > 1:
+            fr = fr.resize((w, h), Image.Resampling.NEAREST)
         if self._ftk is None or self._ftk.width() != w or self._ftk.height() != h:
             self._ftk = ImageTk.PhotoImage(fr)
         else:
@@ -1133,7 +1163,7 @@ class TileMap(tk.Canvas):
         self.create_image(0, 0, image=self._ftk, anchor="nw")
 
     def rs(self):
-        return Image.Resampling.NEAREST if self.anim else RESAMPLE
+        return Image.Resampling.NEAREST if self.anim or LQ["on"] else RESAMPLE
 
     def ovl_img(self, r, color, sel):
         key = (r, color, sel)
@@ -1158,7 +1188,7 @@ class TileMap(tk.Canvas):
         from PIL import ImageFont
         w, h = self.winfo_width(), self.winfo_height()
         fz = self.fz
-        zi = max(0, min(19, int(round(fz))))
+        zi = max(0, min(self.NATIVE, int(round(fz))))
         n = 2 ** zi
         tsf = 256 * 2 ** (fz - zi)
         cx, cy = self.world(self.lat, self.lon, fz)
@@ -1369,12 +1399,12 @@ class TileMap(tk.Canvas):
         w, h = self.winfo_width(), self.winfo_height()
         if w < 2: return
         self.delete("all")
-        if len(self.scaled) > 300: self.scaled.clear()
+        if len(self.scaled) > 400: self.scaled.clear()
         if len(self.ovl) > 500: self.ovl.clear()
         self._sel_geom, self.path_px, self.path_cum = None, [], []
         self._rneed = set()
         fz = self.fz
-        zi = max(0, min(19, int(round(fz))))
+        zi = max(0, min(self.NATIVE, int(round(fz))))
         n = 2 ** zi
         tsf = 256 * 2 ** (fz - zi)
         ts = int(math.ceil(tsf))
@@ -1412,7 +1442,7 @@ class TileMap(tk.Canvas):
         for i, m, mx, my, r in vis:
             c, on = m["color"], i == self.sel
             ri = int(r)
-            if not self.anim and 2 * ri <= 640:
+            if not self.anim and not LQ["on"] and 2 * ri <= 640:
                 q = max(4, ri // 12)
                 self.create_image(mx, my, image=self.ovl_img(max(13, ri // q * q), c, on))
             if r <= 3000:
@@ -1422,8 +1452,8 @@ class TileMap(tk.Canvas):
                 fc = [P(a, b) for a, b in m["fc"]]
                 if len(pts) > 1:
                     flat = [v for p in pts for v in p]
-                    self.create_line(*flat, fill=BG, width=7, smooth=True, capstyle="round")
-                    self.create_line(*flat, fill=c, width=3, smooth=True, capstyle="round")
+                    self.create_line(*flat, fill=BG, width=7, smooth=not LQ["on"], capstyle="round")
+                    self.create_line(*flat, fill=c, width=3, smooth=not LQ["on"], capstyle="round")
                     for px, py in pts[:-1]:
                         self.create_oval(px - 3, py - 3, px + 3, py + 3, fill=BG, outline=c, width=2)
                 if fc:
@@ -1450,7 +1480,7 @@ class TileMap(tk.Canvas):
             d = 5 if on else 3.5
             self.create_oval(mx - d, my - d, mx + d, my + d, fill="white" if on else c,
                              outline=c if on else "white", width=2 if on else 1)
-            if on or (nvis <= 30 and not self.anim and (fz >= 4 or len(self.marks) <= 8)):
+            if on or (nvis <= 30 and not self.anim and not LQ["on"] and (fz >= 4 or len(self.marks) <= 8)):
                 t = self.create_text(mx, my - 20, text=m["label"], fill=TEXT, font=(SANS, 10, "bold"))
                 bb = self.bbox(t)
                 rc = self.create_rectangle(bb[0] - 9, bb[1] - 4, bb[2] + 9, bb[3] + 4,
@@ -1883,6 +1913,13 @@ class App(tk.Tk):
         sb = tk.Frame(self.map, bg=BG, padx=4, pady=4)
         sb.place(relx=1, rely=1, x=-16, y=-122, anchor="se")
         button(sb, "PNG", self.screenshot).pack()
+        qb = tk.Frame(self.map, bg=BG, padx=4, pady=4)
+        qb.place(relx=1, rely=1, x=-16, y=-170, anchor="se")
+        self.b_lq = button(qb, "Low", lambda: self.set_quality(True))
+        self.b_lq.pack(side="left")
+        self.b_hq = button(qb, "High", lambda: self.set_quality(False))
+        self.b_hq.pack(side="left", padx=(4, 0))
+        self.set_quality(LQ["on"])
 
         lg = tk.Frame(self.map, bg=BG, padx=12, pady=8)
         lg.place(x=16, y=16)
@@ -2210,6 +2247,18 @@ class App(tk.Tk):
             self.clk.configure(text=dt.datetime.now(dt.timezone.utc).strftime("UTC  %H:%M"))
             self.after(20000, tick)
         tick()
+
+    def set_quality(self, low):
+        LQ["on"] = low
+        try:
+            os.makedirs(os.path.dirname(QF), exist_ok=True)
+            open(QF, "w").write("low" if low else "high")
+        except OSError:
+            pass
+        self.b_lq.configure(fg=ACCENT if low else TEXT)
+        self.b_hq.configure(fg=TEXT if low else ACCENT)
+        self.map.scaled.clear()
+        self.map.redraw()
 
     def blink(self):
         c = RED if self.mode == "live" else ACCENT
@@ -2875,7 +2924,7 @@ class App(tk.Tk):
         self.cv.yview_moveto(max(0, y - 10) / max(1, self.inner.winfo_height()))
 
     def animate_in(self, i, card, g):
-        if not g["open"] or self._anim_n >= 14:
+        if not g["open"] or self._anim_n >= (0 if LQ["on"] else 14):
             return
         self._anim_n += 1
         n, sid, steps = self._anim_n, self._fsid, 10

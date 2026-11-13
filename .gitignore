@@ -2,3 +2,5 @@ map/
 __pycache__/
 .venv/
 *.bak
+*.bak*
+*.bak*
