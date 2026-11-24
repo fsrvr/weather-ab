@@ -15,6 +15,12 @@ NWS_EVENTS = "Tornado Warning,Extreme Wind Warning,Flash Flood Emergency,Hurrica
 HDR = {"User-Agent": "WeatherAbnormalityTracker/4.0 (github project)"}
 RESAMPLE = Image.Resampling.BILINEAR
 QF = os.path.expanduser("~/.config/weather-ab-quality")
+SETF = os.path.expanduser("~/.config/weather-ab-settings.json")
+def set_load():
+    try:
+        return json.load(open(SETF))
+    except Exception:
+        return {}
 try: LQ = {"on": open(QF).read().strip() != "high"}
 except OSError: LQ = {"on": True}
 SES = requests.Session()
@@ -1774,7 +1780,8 @@ class App(tk.Tk):
         for w in ("Button", "Menubutton", "Checkbutton"):
             self.option_add(f"*{w}.highlightThickness", 0)
         self.title("Extreme Weather Tracker")
-        self.geometry("1360x820")
+        self.ST = set_load()
+        self.geometry(self.ST.get("geo", "1360x820"))
         self.configure(bg=BG)
         self.minsize(900, 600)
         self.f, self.sc0 = 1.0, float(self.tk.call("tk", "scaling"))
@@ -1981,6 +1988,8 @@ class App(tk.Tk):
         self.after(900, lambda: self.schedule(0))
         self.after(1500, self.first_run)
         self.blink()
+        self.after(600000, self.autorefresh)
+        self.bind("<F5>", lambda e: (self.rescan(), "break")[1])
 
     @property
     def hr(self):
@@ -1988,7 +1997,7 @@ class App(tk.Tk):
 
     def cont_menu(self, parent):
         if not hasattr(self, "cont"):
-            self.cont = tk.StringVar(value="Worldwide")
+            self.cont = tk.StringVar(value=self.ST.get("cont") if self.ST.get("cont") in CONT else "Worldwide")
         om = tk.OptionMenu(parent, self.cont, *CONT, command=self.set_cont)
         om.configure(bg=SURF2, fg=TEXT, activebackground=BORDER, activeforeground=TEXT, relief="flat",
                      bd=0, highlightthickness=0, font=(SANS, 10), anchor="w", cursor="hand2", padx=8, pady=5)
@@ -2206,7 +2215,8 @@ class App(tk.Tk):
         m.add_cascade(label="  Continent", menu=cm)
         um = tk.Menu(m, tearoff=0, bg=SURF, fg=TEXT, activebackground=ACCENT, activeforeground=BG,
                      activeborderwidth=0, bd=1, font=(SANS, 10), selectcolor=ACCENT)
-        self.units = tk.StringVar(value="metric")
+        self.units = tk.StringVar(value=self.ST.get("units", "metric"))
+        U["imp"] = self.units.get() == "imp"
         for v, lab in (("metric", "Metric (°C, km/h)"), ("imp", "Imperial (°F, mph)")):
             um.add_radiobutton(label="  " + lab, variable=self.units, value=v, command=self.set_units)
         m.add_cascade(label="  Units", menu=um)
@@ -2247,6 +2257,42 @@ class App(tk.Tk):
             self.clk.configure(text=dt.datetime.now(dt.timezone.utc).strftime("UTC  %H:%M"))
             self.after(20000, tick)
         tick()
+
+    def save_settings(self):
+        try:
+            os.makedirs(os.path.dirname(SETF), exist_ok=True)
+            json.dump({"geo": f"{self.winfo_width()}x{self.winfo_height()}", "cont": self.cont.get(),
+                       "units": self.units.get()}, open(SETF, "w"))
+        except Exception:
+            pass
+
+    def destroy(self):
+        self.save_settings()
+        super().destroy()
+
+    def autorefresh(self):
+        if self.mode == "live":
+            self.rescan()
+        self.after(600000, self.autorefresh)
+
+    def fav_alert(self):
+        hits = []
+        for f in favs_load():
+            for it in self._acc:
+                if it["sev"] >= 2 and hav(f["lat"], f["lon"], it["lat"], it["lon"]) <= it["radius"]:
+                    hits.append(f["name"])
+                    break
+        if not hits:
+            return
+        msg = "Extreme weather near: " + ", ".join(hits[:3])
+        self.status.configure(text=self.status.cget("text") + "  ·  ⚠ " + msg, fg=RED)
+        if msg != getattr(self, "_lastn", None):
+            self._lastn = msg
+            try:
+                import subprocess
+                subprocess.Popen(["notify-send", "-u", "critical", "Extreme Weather Tracker", msg])
+            except Exception:
+                pass
 
     def set_quality(self, low):
         LQ["on"] = low
@@ -2856,6 +2902,8 @@ class App(tk.Tk):
             stats_bar(self.statsbar, self._acc, self.pick_kind, self.flt)
             return
         self.count_status(label)
+        if final and "LIVE" in label:
+            self.fav_alert()
         if not final:
             self.status.configure(text=self.status.cget("text") + "  ·  loading more...")
 
